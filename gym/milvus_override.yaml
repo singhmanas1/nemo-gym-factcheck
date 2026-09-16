@@ -2,7 +2,7 @@ fact_checking_reward_model_dev:
   resources_servers:
     fact_checking_reward_model_dev:
       retrieval_backend: milvus
-      milvus_uri: "http://10.185.120.81:19530"
+      milvus_uri: "http://127.0.0.1:19530"
       milvus_collection_name: finewebBrowsecomp322M
       milvus_embedding_model: google/embeddinggemma-300m
       milvus_embedding_device: cpu

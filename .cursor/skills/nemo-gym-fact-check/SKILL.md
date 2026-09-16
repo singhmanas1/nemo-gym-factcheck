@@ -29,7 +29,7 @@ Always launch with `scripts/start_vllm_policy_checker.sh` (`8192` / `0.70` / `--
 
 ## Milvus connectivity
 
-`10.185.x.x` ClusterIPs are **not** internet or typical AWS VPC addresses. If `curl -m 5 http://<ip>:19530` times out from the GPU box and from a laptop, the IP is cluster-internal.
+Private Kubernetes ClusterIPs are **not** internet or typical AWS VPC addresses. If `curl -m 5 http://<ip>:19530` times out from the GPU box and from a laptop, the IP is cluster-internal.
 
 Ask for LoadBalancer EXTERNAL-IP, VPN, or:
 
@@ -37,7 +37,7 @@ Ask for LoadBalancer EXTERNAL-IP, VPN, or:
 ssh -N -L 19530:<CLUSTER-IP>:19530 user@milvus-node
 ```
 
-Set `milvus_uri: "http://127.0.0.1:19530"`. Do not add `10.185.0.0/16 → igw` on the GPU VPC. Do not open inbound 19530 on the GPU instance SG to “fix” a client timeout (outbound is already all-traffic).
+Set `milvus_uri: "http://127.0.0.1:19530"`. Do not add a ClusterIP CIDR via the internet gateway. Do not open inbound 19530 on the GPU instance SG to “fix” a client timeout (outbound is already all-traffic).
 
 Gym talks to **19530**, not 9091.
 

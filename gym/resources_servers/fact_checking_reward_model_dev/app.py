@@ -356,7 +356,7 @@ class FactCheckingRewardModelDevConfig(BaseResourcesServerConfig):
         description="Number of independent Tantivy searchers used for concurrent search requests.",
     )
     milvus_uri: str = Field(
-        default="http://10.185.120.81:19530",
+        default="http://127.0.0.1:19530",
         description="Milvus server URI.",
     )
     milvus_collection_name: str = Field(

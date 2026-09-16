@@ -47,7 +47,7 @@ Expect slower generations, not a failed load. Larger GPUs can drop `--enforce-ea
 3. A **reachable** Milvus HTTP URI on **TCP 19530**, **or** a Tavily API key.
 4. `curl`, Python 3.12+, and GPU CUDA matching the vLLM wheel you install.
 
-ClusterIP addresses such as `10.185.120.81` only work **inside** the Kubernetes cluster that owns them. They time out from AWS VPCs and from laptops. Ask for LoadBalancer `EXTERNAL-IP`, a VPN, or an SSH tunnel:
+Kubernetes ClusterIPs (private `10.x` / `172.x` service IPs) only work **inside** that cluster. They time out from other VPCs and from laptops. Ask for LoadBalancer `EXTERNAL-IP`, a VPN, or an SSH tunnel:
 
 ```bash
 ssh -N -L 19530:<CLUSTER-IP>:19530 user@milvus-node
@@ -55,7 +55,7 @@ ssh -N -L 19530:<CLUSTER-IP>:19530 user@milvus-node
 
 Then set `milvus_uri: "http://127.0.0.1:19530"`.
 
-Do **not** add `10.185.0.0/16` to an AWS route table whose only other route is `0.0.0.0/0 → igw`. That does not publish a private ClusterIP and does not put Milvus on the internet.
+Do **not** add a private ClusterIP CIDR to an AWS route table whose only other route is `0.0.0.0/0 → igw`. That does not publish a ClusterIP and does not put Milvus on the internet.
 
 ## Quick start
 

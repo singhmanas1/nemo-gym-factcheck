@@ -5,7 +5,7 @@ fact_checking_reward_model_tavily:
     fact_checking_reward_model_tavily:
       tavily_api_key: ${oc.env:TAVILY_API_KEY}
       tavily_max_results: 5
-      tavily_cache_file: /home/ec2-user/tavily_cache.json
+      tavily_cache_file: ${oc.env:HOME}/tavily_cache.json
       judge_model_server:
         type: responses_api_models
         name: policy_model

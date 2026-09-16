@@ -1,4 +1,4 @@
-# Secrets
+# Secrets and local runtime config (never commit)
 .env
 .env.*
 .hf_token

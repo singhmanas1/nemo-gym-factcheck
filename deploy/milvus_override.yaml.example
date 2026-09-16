@@ -1,6 +1,6 @@
 # Copy to gym/milvus_override.yaml and set milvus_uri to an address THIS
 # machine can open on TCP 19530 (LoadBalancer / VPN / SSH tunnel).
-# Kubernetes ClusterIPs such as 10.185.x.x are NOT reachable from AWS or a laptop.
+# Kubernetes ClusterIPs are NOT reachable from another VPC or a laptop.
 fact_checking_reward_model_dev:
   resources_servers:
     fact_checking_reward_model_dev:
