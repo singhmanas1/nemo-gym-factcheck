@@ -60,8 +60,10 @@ Do **not** add `10.185.0.0/16` to an AWS route table whose only other route is `
 ## Quick start
 
 ```bash
-git clone https://github.com/<you>/nemo-gym-factcheck.git
+git clone https://github.com/<your-user>/nemo-gym-factcheck.git
 cd nemo-gym-factcheck
+# First-time publish from this tree (after `gh auth login`):
+#   ./scripts/publish_github.sh
 
 export HF_TOKEN=hf_...          # or write it to .hf_token (mode 600)
 chmod +x scripts/*.sh
@@ -129,6 +131,7 @@ Scores will **not** match FineWeb/Milvus retrieval. Same `search_wiki` tool, dif
 | `scripts/collect_rollouts.sh` | `ng_collect_rollouts` |
 | `scripts/stop_servers.sh` | Stop embed + vLLM pidfiles |
 | `scripts/convert_audited_jsonl.py` | Audited JSONL → Gym input + label sidecar |
+| `scripts/publish_github.sh` | `gh repo create --public` + push (requires `gh auth login`) |
 
 Environment overrides: `POLICY_GPU`, `CHECKER_GPU`, `MAX_MODEL_LEN`, `GPU_MEM_UTIL`, `EMBED_PORT`, `HF_TOKEN`, `MILVUS_URI`.
 
