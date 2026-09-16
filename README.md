@@ -108,14 +108,18 @@ Second terminal:
 cd nemo-gym-factcheck
 source gym/.venv/bin/activate
 ./scripts/collect_rollouts.sh
-# or your dataset:
-# INPUT_JSONL=/path/to/factcheck_input.jsonl OUTPUT_JSONL=./factcheck_output.jsonl ./scripts/collect_rollouts.sh
+# audited RLHF set (156 rows; Gym-shaped already):
+# INPUT_JSONL=data/rlhf24_final_audited_dataset.jsonl OUTPUT_JSONL=./factcheck_output.jsonl ./scripts/collect_rollouts.sh
 ```
 
-Your dataset should already be Gym-shaped (`id` + `responses_create_params` with a `search_wiki` tool). To convert an audited JSONL:
+## Dataset
+
+`data/rlhf24_final_audited_dataset.jsonl` is the audited RLHF fact-check set used in this harness: **156 JSON objects** (the full file; often referred to as the L1–L157 slice). Each row already has Gym `responses_create_params` (including `search_wiki`) plus gold `hallucination_severity` / `expected_errors`.
+
+To strip labels into a sidecar (Gym only needs `id` + `responses_create_params`):
 
 ```bash
-python3 scripts/convert_audited_jsonl.py /path/to/audited.jsonl \
+python3 scripts/convert_audited_jsonl.py data/rlhf24_final_audited_dataset.jsonl \
   --out factcheck_input.jsonl --labels factcheck_labels.jsonl
 ```
 
