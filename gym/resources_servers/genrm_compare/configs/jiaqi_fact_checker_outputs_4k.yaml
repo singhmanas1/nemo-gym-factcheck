@@ -1,0 +1,17 @@
+# Per-call limits validated by the Jiaqi GenRM + Tantivy fact-checker smoke run.
+#
+# These must be loaded as a Gym config path. NeMo-RL overrides on the parent
+# `env.nemo_gym.*` object do not alter the child resource-server config.
+genrm_compare:
+  resources_servers:
+    genrm_compare:
+      genrm_responses_create_params:
+        input: []
+        max_output_tokens: 4096
+        temperature: 0.6
+        top_p: 0.95
+      checker_responses_create_params:
+        input: []
+        max_output_tokens: 4096
+        temperature: 1.0
+        top_p: 1.0

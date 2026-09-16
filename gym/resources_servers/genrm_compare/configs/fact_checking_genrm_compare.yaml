@@ -1,0 +1,55 @@
+# Adds a tool-using, Tantivy-backed fact checker to the pairwise GenRM server.
+# Load this after genrm_compare.yaml and fact_checking_reward_model_dev.yaml.
+
+genrm_compare:
+  resources_servers:
+    genrm_compare:
+      enable_fact_checker: true
+      checker_agent_server:
+        type: responses_api_agents
+        name: genrm_compare_fact_checker_agent
+      checker_responses_create_params:
+        input: []
+        max_output_tokens: 16384
+        temperature: 1.0
+        top_p: 1.0
+      # Both signals are normalized to [0, 1] before combination.
+      # weighted_sum yields a reward in [0, 2]; choose min to require both.
+      fact_checker_weight: 1.0
+      genrm_score_weight: 1.0
+      reward_combination: weighted_sum
+      artifact_log_path: null
+
+genrm_compare_fact_checker_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: fact_checking_reward_model_dev
+      model_server:
+        type: responses_api_models
+        name: genrm_compare_fact_checker_model
+      max_steps: 10
+
+genrm_compare_fact_checker_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: http://127.0.0.1:8000/v1
+      api_key: dummy_key
+      # Set this to the trained fact-checker HF checkpoint from the launcher.
+      model: __GENRM_COMPARE_FACT_CHECKER_MODEL_OVERRIDE_ME__
+      return_token_id_information: false
+      uses_reasoning_parser: false
+      chat_template_kwargs:
+        enable_thinking: true
+      spinup_server: true
+      router_dp_size: 1
+      server_args:
+        tensor_parallel_size: 4
+        gpu_memory_utilization: 0.9
+        max_model_len: 40960
+        trust_remote_code: true
+        enable_auto_tool_choice: true
+        tool_call_parser: qwen3_coder

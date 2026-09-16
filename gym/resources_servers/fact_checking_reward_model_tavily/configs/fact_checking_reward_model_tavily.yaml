@@ -1,0 +1,43 @@
+# Fact-Checking Reward Model (Tavily): same as fact_checking_reward_model but uses
+# Tavily web search instead of Kiwix Wikipedia.
+fact_checking_reward_model_tavily:
+  resources_servers:
+    fact_checking_reward_model_tavily:
+      entrypoint: app.py
+      domain: rlhf
+      verified: false
+      description: Fact-checking reward model with Tavily web search and quality scoring
+      # Required: Tavily API key for web search
+      tavily_api_key: ""  # set via env var or override
+      tavily_max_results: 5
+      tavily_cache_file: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemotron_nano/users/abukharin/fact-rm/fact-checker/evals/factscore/.cache/factscore/tavily_cache_global.json
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 2048
+        temperature: 0.0
+        top_p: 1.0
+      rubric_parallel_evaluation: true
+      factuality_weight: 2.0
+      quality_weight: 1.0
+
+fact_checking_reward_model_tavily_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: fact_checking_reward_model_tavily
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: train
+          type: train
+          jsonl_fpath: /lustre/fsw/portfolios/llmservice/users/abukharin/fact-rm/fact-checker/evals/factscore/data/rlhf_veriscore_rm_train_tavily.jsonl
+          license: Apache 2.0
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/fact_checking_reward_model/data/example.jsonl

@@ -1,0 +1,2 @@
+-e nemo-gym[dev] @ ../../
+bm25s

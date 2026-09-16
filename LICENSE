@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Launch scripts, example configs, and the Cursor skill in this repository
+# are Apache-2.0.
+#
+# The gym/ directory is NVIDIA NeMo Gym (Apache-2.0). See gym/LICENSE.

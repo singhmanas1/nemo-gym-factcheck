@@ -1,0 +1,74 @@
+# Minimal pointwise-GenRM policy-optimization environment.
+#
+# This intentionally excludes the fact checker, Tantivy server, and evidence
+# judge. Gym starts every server declared in the loaded configs, even when the
+# verifier would never call it, so sharing the joint config wastes nodes and
+# can make startup fail.
+fact_checking_rm_policy_optimization:
+  resources_servers:
+    fact_checking_rm_policy_optimization:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: Policy reward from a frozen pointwise GenRM quality score
+      checker_agent_server: null
+      checker_responses_create_params: null
+      genrm_agent_server:
+        type: responses_api_agents
+        name: fact_checking_rm_policy_optimization_genrm_agent
+      genrm_responses_create_params:
+        input: []
+        max_output_tokens: 8192
+        temperature: 0.0
+        top_p: 1.0
+      retrieval_backend: none
+      judge_model_server: null
+      judge_responses_create_params: null
+      genrm_score_weight: 1.0
+      reward_combination: genrm_only
+      missing_genrm_score_reward: 0.0
+      reward_for_parse_failure: 0.0
+      artifact_log_path: null
+
+fact_checking_rm_policy_optimization_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: fact_checking_rm_policy_optimization
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 1
+
+fact_checking_rm_policy_optimization_genrm_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: fact_checking_rm_policy_optimization
+      model_server:
+        type: responses_api_models
+        name: fact_checking_rm_policy_optimization_genrm_model
+      max_steps: 1
+
+fact_checking_rm_policy_optimization_genrm_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: http://127.0.0.1:8000/v1
+      api_key: dummy_key
+      model: __FACT_CHECKING_RM_POLICY_OPTIMIZATION_GENRM_MODEL_OVERRIDE_ME__
+      return_token_id_information: false
+      uses_reasoning_parser: false
+      chat_template_kwargs:
+        enable_thinking: true
+      spinup_server: true
+      router_dp_size: 1
+      server_args:
+        tensor_parallel_size: 4
+        gpu_memory_utilization: 0.9
+        max_model_len: 32768
+        trust_remote_code: true

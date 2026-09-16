@@ -1,0 +1,53 @@
+# Fact Hallucination Detection: trains a policy model to generate factually
+# accurate responses, scored by a trained GenRM judge with Wikipedia evidence.
+fact_hallucination_detection:
+  resources_servers:
+    fact_hallucination_detection:
+      entrypoint: app.py
+      domain: rlhf
+      verified: false
+      description: Train models to generate factually accurate responses using a GenRM judge
+
+      # GenRM judge model server (the trained generative reward model)
+      judge_model_server:
+        type: responses_api_models
+        name: genrm_model
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 4096
+        temperature: 0.0
+        top_p: 1.0
+
+      # Reward mode: 'binary' = 1.0 if zero errors, 0.0 otherwise
+      reward_mode: binary
+
+      # Search backend configuration
+      search_backend_type: kiwix
+      # kiwix_zim_dir: /data/zim
+      kiwix_port: 8083
+      kiwix_serve_path: kiwix-serve
+      kiwix_max_chars: 8000
+      kiwix_top_k: 3
+
+fact_hallucination_detection_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: fact_hallucination_detection
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: hotpotqa_train
+          type: train
+          jsonl_fpath: resources_servers/fact_hallucination_detection/data/hotpotqa_train.jsonl
+          license: Creative Commons Attribution-ShareAlike 4.0 International
+        - name: hotpotqa_val
+          type: validation
+          jsonl_fpath: resources_servers/fact_hallucination_detection/data/hotpotqa_val.jsonl
+          license: Creative Commons Attribution-ShareAlike 4.0 International
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/fact_hallucination_detection/data/example.jsonl

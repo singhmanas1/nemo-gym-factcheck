@@ -1,0 +1,67 @@
+# Joint Factual RM Policy Optimization (Tavily): same as joint_factual_rm_policy_optimization
+# but uses Tavily web search instead of Kiwix Wikipedia.
+joint_factual_rm_policy_optimization_tavily:
+  resources_servers:
+    joint_factual_rm_policy_optimization_tavily:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: Downstream reward using the Tavily-trained joint factual+quality RM
+      rm_agent_server:
+        type: responses_api_agents
+        name: joint_factual_rm_policy_optimization_tavily_rm_agent
+      rm_responses_create_params:
+        input: []
+        max_output_tokens: 16384
+        temperature: 1.0
+        top_p: 1.0
+      tavily_api_key: ""  # set via env var or override
+      tavily_max_results: 5
+      tavily_cache_file: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemotron_nano/users/abukharin/fact-rm/fact-checker/evals/factscore/.cache/factscore/tavily_cache_global.json
+      factuality_weight: 0.5
+      quality_weight: 0.5
+
+joint_factual_rm_policy_optimization_tavily_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: joint_factual_rm_policy_optimization_tavily
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+joint_factual_rm_policy_optimization_tavily_rm_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: joint_factual_rm_policy_optimization_tavily
+      model_server:
+        type: responses_api_models
+        name: joint_factual_rm_model
+      max_steps: 10
+
+joint_factual_rm_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: http://127.0.0.1:8000/v1
+      api_key: dummy_key
+      model: __JOINT_FACTUAL_RM_MODEL_OVERRIDE_ME__
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      chat_template_kwargs:
+        enable_thinking: true
+      spinup_server: true
+      router_dp_size: 1
+      server_args:
+        tensor_parallel_size: 1
+        gpu_memory_utilization: 0.9
+        max_model_len: 32768
+        trust_remote_code: true
+        enable_auto_tool_choice: true
+        tool_call_parser: qwen3_coder
+        reasoning_parser: deepseek_r1

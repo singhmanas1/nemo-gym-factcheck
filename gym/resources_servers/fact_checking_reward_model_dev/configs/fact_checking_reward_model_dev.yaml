@@ -1,0 +1,70 @@
+# Dev variant of fact_checking_reward_model for iterating on the search engine.
+# All component names use the _dev suffix so this can run alongside production.
+# Supports Tantivy over OpenResearcher or external Milvus semantic retrieval.
+fact_checking_reward_model_dev:
+  resources_servers:
+    fact_checking_reward_model_dev:
+      entrypoint: app.py
+      domain: rlhf
+      verified: false
+      description: fact-checking reward model (F1 + severity) with Tantivy.
+      search_top_k: 3
+      corpus_db_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemotron_nano/users/abukharin/midtraining/deep_research/OpenResearcher/corpus.db
+      corpus_stage_local: true
+      corpus_local_root: /tmp
+      max_result_chars: 8000
+      search_cache_size: 10000
+      retrieval_backend: tantivy
+      tantivy_index_dir: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemotron_nano/users/abukharin/midtraining/deep_research/OpenResearcher/tantivy-openresearcher
+      tantivy_stage_local: true
+      tantivy_local_root: /tmp
+      tantivy_candidate_pool: 10
+      milvus_uri: http://10.185.120.81:19530
+      milvus_collection_name: finewebBrowsecomp322M
+      milvus_embedding_model: google/embeddinggemma-300m
+      milvus_embedding_device: cpu
+      milvus_anns_field: emb
+      milvus_search_list: 256
+      milvus_timeout_seconds: 30.0
+      milvus_candidate_multiplier: 4
+      use_context_aware_prompt: false
+      judge_model_server:
+        type: responses_api_models
+        name: fact_checking_dev_judge_model
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 4096
+        temperature: 0.6
+        top_p: 1.0
+      rubric_parallel_evaluation: true
+      factuality_weight: 1.0
+      f_beta: 1.0
+      severity_weight: 0.1
+
+fact_checking_reward_model_dev_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: fact_checking_reward_model_dev
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 10
+
+fact_checking_dev_judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: http://127.0.0.1:8000/v1
+      api_key: dummy_key
+      model: __FACT_CHECKING_DEV_JUDGE_MODEL_OVERRIDE_ME__
+      return_token_id_information: false
+      uses_reasoning_parser: false
+      spinup_server: true
+      router_dp_size: 4
+      server_args:
+        tensor_parallel_size: 8
+        gpu_memory_utilization: 0.9
+        max_model_len: 65536

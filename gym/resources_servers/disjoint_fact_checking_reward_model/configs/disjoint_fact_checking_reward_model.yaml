@@ -1,0 +1,46 @@
+# Disjoint Fact-Checking Reward Model: each datapoint trains on either the
+# factuality component or the quality component exclusively, determined by
+# the loss_type field in the training data:
+#   loss_type = "factuality" → reward = factuality_weight * classification_accuracy * (1 + f1_score)
+#   loss_type = "quality"    → reward = -|ground_truth_quality - predicted_quality|
+#   loss_type = "regression" → joint reward (same as fact_checking_reward_model)
+disjoint_fact_checking_reward_model:
+  resources_servers:
+    disjoint_fact_checking_reward_model:
+      entrypoint: app.py
+      domain: rlhf
+      verified: false
+      description: Disjoint fact-checking reward model — trains factuality and quality objectives separately per datapoint
+      kiwix_zim_dir: /lustre/fs1/portfolios/llmservice/users/abukharin/fact-rm/zim_files
+      kiwix_port: 8082
+      kiwix_serve_path: /lustre/fs1/portfolios/llmservice/users/abukharin/fact-rm/kiwix-tools_linux-x86_64-3.7.0/kiwix-serve
+      kiwix_max_chars: 8000
+      kiwix_top_k: 3
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 2048
+        temperature: 0.0
+        top_p: 1.0
+      rubric_parallel_evaluation: true
+      factuality_weight: 2.0
+
+disjoint_fact_checking_reward_model_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: disjoint_fact_checking_reward_model
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: train
+          type: train
+          jsonl_fpath: resources_servers/disjoint_fact_checking_reward_model/data/train.jsonl
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/fact_checking_reward_model/data/example.jsonl

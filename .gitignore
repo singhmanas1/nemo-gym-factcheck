@@ -1,0 +1,26 @@
+# Secrets
+.env
+.env.*
+.hf_token
+**/env.yaml
+tavily_cache.json
+*.pid
+
+# Python / Gym
+.venv/
+.venv-embed/
+.venv-serve/
+__pycache__/
+*.pyc
+.hydra/
+outputs/
+*.egg-info/
+
+# Logs and local run artifacts
+*.log
+/tmp/
+factcheck_output*.jsonl
+.cache/
+
+# OS
+.DS_Store

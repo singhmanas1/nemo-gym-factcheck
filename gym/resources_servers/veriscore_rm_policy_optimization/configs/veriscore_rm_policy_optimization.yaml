@@ -1,0 +1,129 @@
+# VeriScore + RM Policy Optimization
+#
+# Reward = factuality_weight * VeriScorePenalty(response) + quality_weight * RM_quality(response)
+#   VeriScoreScore(response): number_of_supported_atoms - number_of_contradicted_atoms
+#   RM_quality(response): trained RM quality score normalized from 1-5 to 0-1
+#
+# OpenResearcher retrieval is used by the VeriScore atom verifier.
+veriscore_rm_policy_optimization:
+  resources_servers:
+    veriscore_rm_policy_optimization:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: Policy reward using VeriScore factuality plus RM quality over OpenResearcher search
+      rm_agent_server:
+        type: responses_api_agents
+        name: veriscore_rm_policy_optimization_rm_agent
+      rm_responses_create_params:
+        input: []
+        max_output_tokens: 16384
+        temperature: 1.0
+        top_p: 1.0
+      retrieval_backend: tantivy
+      kiwix_zim_dir: null
+      kiwix_port: 8082
+      kiwix_serve_path: null
+      kiwix_max_chars: 8000
+      kiwix_top_k: 3
+      bm25s_db_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemotron_nano/users/abukharin/midtraining/deep_research/OpenResearcher/corpus.db
+      bm25s_max_chars: 8000
+      tantivy_index_dir: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemotron_nano/users/abukharin/midtraining/deep_research/OpenResearcher/tantivy-openresearcher
+      tantivy_stage_local: false
+      tantivy_local_root: /tmp
+      tantivy_candidate_pool: 10
+      use_context_aware_prompt: false
+      search_log_path: null
+      judge_model_server:
+        type: responses_api_models
+        name: veriscore_rm_policy_optimization_judge_model
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 4096
+        temperature: 0.0
+        top_p: 1.0
+      factuality_weight: 0.5
+      quality_weight: 0.5
+      veriscore_max_sentences: 24
+      veriscore_max_atoms: 32
+      veriscore_atomization_concurrency: 4
+      veriscore_judge_concurrency: 4
+      veriscore_atomization_max_output_tokens: 1024
+      veriscore_judge_max_output_tokens: 256
+      veriscore_evidence_top_k: 3
+      veriscore_evidence_max_chars_per_hit: 3000
+      veriscore_near_duplicate_similarity_threshold: 0.88
+
+veriscore_rm_policy_optimization_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: veriscore_rm_policy_optimization
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+# Backward-compatible alias for existing joint-RM policy optimization datasets.
+# Those rows keep agent_ref.name set to joint_factual_rm_policy_optimization_simple_agent.
+joint_factual_rm_policy_optimization_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: veriscore_rm_policy_optimization
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+veriscore_rm_policy_optimization_rm_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: veriscore_rm_policy_optimization
+      model_server:
+        type: responses_api_models
+        name: veriscore_rm_policy_optimization_rm_model
+      max_steps: 10
+
+veriscore_rm_policy_optimization_rm_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: http://127.0.0.1:8000/v1
+      api_key: dummy_key
+      model: __VERISCORE_RM_QUALITY_MODEL_OVERRIDE_ME__
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      chat_template_kwargs:
+        enable_thinking: true
+      spinup_server: true
+      router_dp_size: 1
+      server_args:
+        tensor_parallel_size: 1
+        gpu_memory_utilization: 0.9
+        max_model_len: 32768
+        trust_remote_code: true
+        enable_auto_tool_choice: true
+        tool_call_parser: qwen3_coder
+        reasoning_parser: deepseek_r1
+
+veriscore_rm_policy_optimization_judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: http://127.0.0.1:8000/v1
+      api_key: dummy_key
+      model: __VERISCORE_RM_JUDGE_MODEL_OVERRIDE_ME__
+      return_token_id_information: false
+      uses_reasoning_parser: false
+      spinup_server: true
+      router_dp_size: 1
+      server_args:
+        tensor_parallel_size: 1
+        gpu_memory_utilization: 0.9
+        max_model_len: 65536
