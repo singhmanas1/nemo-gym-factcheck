@@ -6,21 +6,39 @@ This repository is a snapshot of [NVIDIA-NeMo/Gym](https://github.com/NVIDIA-NeM
 
 ## What you get
 
-```
-Prompt  →  policy vLLM :8000
-                ↓
-Checker LLM :8001  ──search_wiki──►  embeddings :8002  ──►  Milvus :19530
-                ↓                                              or Tavily API
-         [Factual Errors] block
-                ↓
-         factuality_f1_score
+**One GPU per model.** The default launchers pin three processes to three separate GPUs (`CUDA_VISIBLE_DEVICES`). Do not colocate policy and checker on the same 32GB card.
+
+```mermaid
+flowchart LR
+  subgraph host["GPU host — 1 GPU per model"]
+    direction TB
+    subgraph g0["GPU 0"]
+      E["EmbeddingGemma-300M<br/>:8002 /v1/embeddings"]
+    end
+    subgraph g1["GPU 1"]
+      P["Policy Nemotron 9B-v2<br/>vLLM :8000"]
+    end
+    subgraph g2["GPU 2"]
+      C["Checker / judge 9B-v2<br/>vLLM :8001"]
+    end
+    Gym["ng_run Gym process<br/>CPU"]
+  end
+  In["factcheck_input.jsonl"] --> P
+  P -->|"policy completions"| Gym
+  Gym -->|"judge + search_wiki"| C
+  C -->|"embed queries"| E
+  E --> M["Milvus :19530"]
+  E -.-> T["Tavily API"]
+  C --> Out["[Factual Errors] → F1"]
 ```
 
-| GPU (default) | Process | Port |
+| GPU (default) | Exclusive process | Port |
 |---|---|---|
-| 0 | EmbeddingGemma-300M | `8002` |
-| 1 | Policy `NVIDIA-Nemotron-Nano-9B-v2` | `8000` |
-| 2 | Checker / judge (same 9B) | `8001` |
+| 0 | EmbeddingGemma-300M only | `8002` |
+| 1 | Policy `NVIDIA-Nemotron-Nano-9B-v2` only | `8000` |
+| 2 | Checker / judge (same 9B weights, second replica) only | `8001` |
+
+Extra GPUs on the box stay idle. Override with `POLICY_GPU` / `CHECKER_GPU` / `CUDA_VISIBLE_DEVICES` if your numbering differs.
 
 `nvidia/NVIDIA-Nemotron-Nano-8B-v2` does **not** exist on Hugging Face. Use **9B-v2**.
 
