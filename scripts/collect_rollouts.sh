@@ -21,7 +21,13 @@ cd "$GYM_ROOT"
 echo "agent=$AGENT"
 echo "input=$INPUT"
 echo "output=$OUTPUT"
-ng_collect_rollouts \
-  +agent_name="$AGENT" \
-  +input_jsonl_fpath="$INPUT" \
+COLLECT_ARGS=(
+  +agent_name="$AGENT"
+  +input_jsonl_fpath="$INPUT"
   +output_jsonl_fpath="$OUTPUT"
+)
+if [[ -n "${NUM_SAMPLES_IN_PARALLEL:-}" ]]; then
+  echo "num_samples_in_parallel=$NUM_SAMPLES_IN_PARALLEL"
+  COLLECT_ARGS+=(+num_samples_in_parallel="$NUM_SAMPLES_IN_PARALLEL")
+fi
+ng_collect_rollouts "${COLLECT_ARGS[@]}"

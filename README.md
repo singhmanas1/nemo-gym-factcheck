@@ -2,7 +2,7 @@
 
 End-to-end setup for NVIDIA **NeMo Gym** fact-checking rollouts: a policy model, a checker/judge, EmbeddingGemma query embeddings, and either **Milvus** or **Tavily** behind `search_wiki`.
 
-This repository is a snapshot of [NVIDIA-NeMo/Gym](https://github.com/NVIDIA-NeMo/Gym) (`gym/`, Apache-2.0) plus launch scripts, example configs, and a Cursor Agent Skill. Upstream Gym is unmodified except for an optional OpenAI-compatible embedding client (`milvus_embedding_base_url`) on the fact-check reward-model server.
+This repository is a snapshot of [NVIDIA-NeMo/Gym](https://github.com/NVIDIA-NeMo/Gym) (`gym/`, Apache-2.0) plus launch scripts, example configs, and a Cursor Agent Skill. Gym is patched for this harness: optional OpenAI-compatible embeddings (`milvus_embedding_base_url`), policy search cap, line-count `num_errors`, per-sample step timings, and YES/NO-only judging.
 
 ## What you get
 
@@ -16,51 +16,56 @@ flowchart LR
       E["EmbeddingGemma-300M<br/>:8002 /v1/embeddings"]
     end
     subgraph g1["GPU 1"]
-      P["Policy Nemotron 9B-v2<br/>vLLM :8000"]
+      P["Policy Nemotron Lightning 30B-A3B<br/>vLLM :8000"]
     end
     subgraph g2["GPU 2"]
-      C["Checker / judge 9B-v2<br/>vLLM :8001"]
+      C["Checker / judge Lightning 30B-A3B<br/>vLLM :8001"]
     end
     Gym["ng_run Gym process<br/>CPU"]
   end
   In["factcheck_input.jsonl"] --> P
-  P -->|"policy completions"| Gym
-  Gym -->|"judge + search_wiki"| C
-  C -->|"embed queries"| E
+  P -->|"completions + tool calls"| Gym
+  Gym -->|"search_wiki"| E
   E --> M["Milvus :19530"]
-  E -.-> T["Tavily API"]
+  Gym -.-> T["Tavily API"]
+  Gym -->|"YES/NO matcher"| C
   C --> Out["[Factual Errors] → F1"]
 ```
 
 | GPU (default) | Exclusive process | Port |
 |---|---|---|
 | 0 | EmbeddingGemma-300M only | `8002` |
-| 1 | Policy `NVIDIA-Nemotron-Nano-9B-v2` only | `8000` |
-| 2 | Checker / judge (same 9B weights, second replica) only | `8001` |
+| 1 | Policy `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16` only | `8000` |
+| 2 | Checker / judge (same Lightning weights, second replica) only | `8001` |
 
 Extra GPUs on the box stay idle. Override with `POLICY_GPU` / `CHECKER_GPU` / `CUDA_VISIBLE_DEVICES` if your numbering differs.
 
-`nvidia/NVIDIA-Nemotron-Nano-8B-v2` does **not** exist on Hugging Face. Use **9B-v2**.
+`nvidia/NVIDIA-Nemotron-Nano-8B-v2` does **not** exist on Hugging Face. Lightning is the default. 9B-v2: `POLICY_MODEL=nvidia/NVIDIA-Nemotron-Nano-9B-v2`.
 
-## Hardware notes (32GB cards)
+## Scoring and retrieval
 
-9B bf16 weights are ~16.6 GiB. That **fits** an RTX PRO 4500 32GB. Default vLLM (`--max-model-len 32768 --gpu-memory-utilization 0.90` plus CUDA graphs) does **not**: KV cache + Mamba graph warmup OOMs with ~1 GiB free.
+`search_wiki` still hits **Milvus FineWeb** (or Tavily). The policy may issue at most **3 unique** queries (`max_search_calls`); duplicate queries are stubbed. First step is forced `tool_choice: required`; after the search budget, `tool_choice: none` writes the tagged verdict.
 
-The launchers use:
+F1 is vs gold `expected_errors`, not vs the corpus:
 
-- `--max-model-len 8192`
-- `--gpu-memory-utilization 0.70`
-- `--max-num-seqs 8`
-- `--enforce-eager` (slower decode; required to skip graph recapture)
-- `VLLM_USE_FLASHINFER_SAMPLER=0`
+- Empty gold `[]`: F1 1 iff the error box is blank (or a “none found” one-liner).
+- Filled gold: YES/NO matcher on `:8001` vs the **whole** error box; `num_errors` is **line-count** (the count LLM is not called).
 
-Expect slower generations, not a failed load. Larger GPUs can drop `--enforce-eager` and raise context after a successful start.
+Collect **appends**. Always use a new `OUTPUT_JSONL`. A compact sidecar `*.metrics.jsonl` stores per-sample F1 and `t_*` step times (`t_count_judge_s` should be 0). Gym Python changes: `./scripts/stop_gym.sh` then `./scripts/start_gym.sh` — leave vLLM/embed running.
+
+Do not tune on a single crossword row. Use a mixed empty/filled slice (`scripts/extract_mixed_gold_slice.py`) and `scripts/summarize_slice_timings.py`.
+
+## Hardware notes
+
+**Lightning 30B-A3B (default, H100-class):** `--max-model-len 131072`, `--gpu-memory-utilization 0.85`, prefix caching, Triton mamba unless `nvcc` is present (`MAMBA_BACKEND=flashinfer`), `--tool-call-parser qwen3_coder`, `--reasoning-parser nemotron_v3`.
+
+**9B-v2 on 32GB:** weights fit; default vLLM 32k + 0.90 util OOMs. Use `POLICY_MODEL=nvidia/NVIDIA-Nemotron-Nano-9B-v2 MAX_MODEL_LEN=8192` (0.70 util, `--enforce-eager`, `nemotron_json` parser plugin).
 
 ## Prerequisites
 
 1. Linux host with NVIDIA drivers and at least **3 GPUs** (one each for embed / policy / checker).
 2. Hugging Face token with access to:
-   - [`nvidia/NVIDIA-Nemotron-Nano-9B-v2`](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2) (accept the license)
+   - [`nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16`](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16) (OpenMDW; accept if gated)
    - [`google/embeddinggemma-300m`](https://huggingface.co/google/embeddinggemma-300m) (gated; acknowledge the license)
 3. A **reachable** Milvus HTTP URI on **TCP 19530**, **or** a Tavily API key.
 4. `curl`, Python 3.12+, and GPU CUDA matching the vLLM wheel you install.
@@ -108,8 +113,12 @@ Second terminal:
 cd nemo-gym-factcheck
 source gym/.venv/bin/activate
 ./scripts/collect_rollouts.sh
-# audited RLHF set (156 rows; Gym-shaped already):
-# INPUT_JSONL=data/rlhf24_final_audited_dataset.jsonl OUTPUT_JSONL=./factcheck_output.jsonl ./scripts/collect_rollouts.sh
+# audited RLHF set (156 rows):
+# INPUT_JSONL=data/rlhf24_final_audited_dataset.jsonl OUTPUT_JSONL=./factcheck_output.jsonl NUM_SAMPLES_IN_PARALLEL=2 ./scripts/collect_rollouts.sh
+# mixed 4 empty + 6 filled (skips Chris Rock):
+# python3 scripts/extract_mixed_gold_slice.py data/rlhf24_final_audited_dataset.jsonl data/rlhf24_mixed10.jsonl
+# INPUT_JSONL=data/rlhf24_mixed10.jsonl OUTPUT_JSONL=./factcheck_output_mixed10.jsonl NUM_SAMPLES_IN_PARALLEL=2 ./scripts/collect_rollouts.sh
+# python3 scripts/summarize_slice_timings.py ./factcheck_output_mixed10.jsonl
 ```
 
 ## Dataset
@@ -150,8 +159,13 @@ Scores will **not** match FineWeb/Milvus retrieval. Same `search_wiki` tool, dif
 | `scripts/start_vllm_policy_checker.sh` | GPU1/2 Nemotron `:8000` / `:8001` |
 | `scripts/check_endpoints.sh` | `curl` the three local HTTP APIs |
 | `scripts/start_gym.sh` | `ng_run` (set `BACKEND=tavily` to skip Milvus) |
-| `scripts/collect_rollouts.sh` | `ng_collect_rollouts` |
-| `scripts/stop_servers.sh` | Stop embed + vLLM pidfiles |
+| `scripts/stop_gym.sh` | Stop Gym only (leave vLLM/embed) |
+| `scripts/stop_vllm.sh` / `scripts/stop_servers.sh` | Stop vLLM / embed+vLLM |
+| `scripts/collect_rollouts.sh` | `ng_collect_rollouts` (`NUM_SAMPLES_IN_PARALLEL`, `INPUT_JSONL`, `OUTPUT_JSONL`) |
+| `scripts/extract_mixed_gold_slice.py` | 4 empty + 6 filled gold, skip Chris Rock |
+| `scripts/summarize_slice_timings.py` | Empty vs filled F1 + `t_*` from `.metrics.jsonl` |
+| `scripts/collect_timing.py` | p95 latency + samples/min |
+| `scripts/show_scored_errors.py` | Gold vs predicted error box + step table |
 | `scripts/convert_audited_jsonl.py` | Audited JSONL → Gym input + label sidecar |
 | `scripts/publish_github.sh` | `gh repo create --public` + push (requires `gh auth login`) |
 
@@ -170,8 +184,8 @@ Copy into `~/.cursor/skills/nemo-gym-fact-check/` to use it in other workspaces.
 ## Verify
 
 ```bash
-curl -s http://127.0.0.1:8000/v1/models   # policy, 9B-v2, max_model_len 8192
-curl -s http://127.0.0.1:8001/v1/models   # checker
+curl -s http://127.0.0.1:8000/v1/models   # policy Lightning (or 9B-v2)
+curl -s http://127.0.0.1:8001/v1/models   # checker / YES/NO matcher
 curl -s http://127.0.0.1:8002/healthz     # embed
 curl -m 5 -v "$MILVUS_URI"                # must not hang
 ```
@@ -182,3 +196,5 @@ Empty `curl /v1/models` while GPU memory is high usually means EngineCore is sti
 
 - `gym/` — NVIDIA NeMo Gym, Apache-2.0 (`gym/LICENSE`)
 - Scripts and skill in this overlay — Apache-2.0
+
+Do not commit `.hf_token`, `gym/env.yaml`, `gym/milvus_override.yaml`, or `factcheck_output*.jsonl`.

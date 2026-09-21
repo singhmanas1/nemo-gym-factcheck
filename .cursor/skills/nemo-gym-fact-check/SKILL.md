@@ -5,45 +5,30 @@ description: Set up and run the NeMo Gym fact-checking evaluation pipeline with 
 
 # NeMo Gym fact-checking
 
-Follow the repo README first: `README.md` in the repository root. Use the scripts in `scripts/` instead of ad-hoc `vllm serve` flags.
+Follow `README.md` in the repo root. Use `scripts/` instead of ad-hoc `vllm serve` flags.
 
 ## Pipeline
 
 ```
-Prompt → policy vLLM :8000 → checker :8001 ──search_wiki──► embed :8002 ──► Milvus :19530
-                                                                      or Tavily
-Checker emits [Factual Errors] → verify() → factuality_f1_score
+Prompt → policy :8000 → checker :8001 ──search_wiki──► embed :8002 ──► Milvus :19530
+                                                              or Tavily
+Policy writes [Factual Errors] → verify() → factuality_f1_score
 ```
 
-- No separate atomization step. The checker chooses search queries.
-- One Milvus/Tavily call **per search query**, not per sample.
-- Policy and checker are the same 9B weights on **two GPUs**. Do not use `NVIDIA-Nemotron-Nano-8B-v2` (HF 404). Use `nvidia/NVIDIA-Nemotron-Nano-9B-v2`.
+- Same Lightning weights on two GPUs (`:8000` policy / `:8001` YES/NO matcher). Default: `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16` (`qwen3_coder`, `--reasoning-parser nemotron_v3`). 9B-v2: `POLICY_MODEL=nvidia/NVIDIA-Nemotron-Nano-9B-v2`. Not `Nano-8B-v2` (HF 404).
+- `search_wiki` is still Milvus (or Tavily): one HTTP call per **unique** query. Policy cap: `max_search_calls: 3`, duplicate queries skipped, then `tool_choice: none` writes the tagged verdict.
+- F1 vs gold `expected_errors`, not vs FineWeb. Empty gold: blank error box → F1 1. Filled gold: YES/NO matcher vs the whole error box; `num_errors` is **line-count** (no count LLM).
+- Collect **appends**. Use a new `OUTPUT_JSONL`. Sidecar `*.metrics.jsonl` has per-sample F1 plus `t_*` step times. Python-only changes: bounce Gym (`stop_gym.sh` / `start_gym.sh`), not vLLM.
 
-## 32GB GPUs (RTX PRO 4500 class)
+## 32GB GPUs (9B only)
 
-Weights (~16.6 GiB) fit. Default vLLM 32k ctx + 0.90 util + CUDA graphs **OOM** during Mamba warmup.
+Lightning 30B needs large cards (this harness defaults to H100, `--max-model-len 131072`). For 9B on 32GB use `scripts/start_vllm_policy_checker.sh` with `POLICY_MODEL=...9B-v2` and `MAX_MODEL_LEN=8192` (`0.70` util, `--enforce-eager`). Empty `curl :8000/v1/models` → read `vllm_policy.log`.
 
-Always launch with `scripts/start_vllm_policy_checker.sh` (`8192` / `0.70` / `--enforce-eager` / `VLLM_USE_FLASHINFER_SAMPLER=0`). Empty `curl :8000/v1/models` means the engine is not up; read `vllm_policy.log`.
+## Milvus
 
-`--enforce-eager` increases decode latency; that is the cost of fitting 9B hybrid on 32GB.
+Gym talks to **19530**. ClusterIPs are not public. Tunnel or LoadBalancer; set `milvus_uri` in `gym/milvus_override.yaml` (copy from `deploy/milvus_override.yaml.example`). Do not commit that file (local URI). Embeddings go to local `:8002` via `milvus_embedding_base_url`. Keep `summarize_retrieval_results: false` for raw FineWeb text.
 
-## Milvus connectivity
-
-Private Kubernetes ClusterIPs are **not** internet or typical AWS VPC addresses. If `curl -m 5 http://<ip>:19530` times out from the GPU box and from a laptop, the IP is cluster-internal.
-
-Ask for LoadBalancer EXTERNAL-IP, VPN, or:
-
-```bash
-ssh -N -L 19530:<CLUSTER-IP>:19530 user@milvus-node
-```
-
-Set `milvus_uri: "http://127.0.0.1:19530"`. Do not add a ClusterIP CIDR via the internet gateway. Do not open inbound 19530 on the GPU instance SG to “fix” a client timeout (outbound is already all-traffic).
-
-Gym talks to **19530**, not 9091.
-
-This snapshot already supports `milvus_embedding_base_url` so Gym can POST to the local embed server on `:8002` instead of loading SentenceTransformer inside Gym.
-
-## Commands (from repo root)
+## Commands (repo root)
 
 ```bash
 export HF_TOKEN=hf_...
@@ -59,17 +44,20 @@ cp deploy/milvus_override.yaml.example gym/milvus_override.yaml
 ./scripts/collect_rollouts.sh
 ```
 
-Tavily (no Milvus): `BACKEND=tavily ./scripts/start_gym.sh` with `TAVILY_API_KEY`.
+Mixed empty+filled slice (skip Chris Rock crossword):
 
-Convert audited JSONL: `python3 scripts/convert_audited_jsonl.py audited.jsonl`.
+```bash
+python3 scripts/extract_mixed_gold_slice.py data/rlhf24_final_audited_dataset.jsonl data/rlhf24_mixed10.jsonl
+NUM_SAMPLES_IN_PARALLEL=2 INPUT_JSONL=data/rlhf24_mixed10.jsonl OUTPUT_JSONL=./factcheck_output_mixed10.jsonl ./scripts/collect_rollouts.sh
+python3 scripts/summarize_slice_timings.py ./factcheck_output_mixed10.jsonl
+```
 
-## Hugging Face
-
-Accept licenses for Nemotron-9B-v2 and `google/embeddinggemma-300m`. Fine-grained tokens need gated-repo access. Prefer `HF_HUB_DISABLE_XET=1` if downloads segfault after 403s.
+Do not iterate on a single crossword row. Tavily: `BACKEND=tavily ./scripts/start_gym.sh` with `TAVILY_API_KEY`.
 
 ## Do not
 
-- Serve 32k context on 32GB for this 9B hybrid.
+- Serve 32k context on 32GB for 9B hybrid.
 - Treat ClusterIP as a public URL.
-- Commit `.hf_token`, `gym/env.yaml`, or rollout outputs with secrets.
+- Commit `.hf_token`, `gym/env.yaml`, `gym/milvus_override.yaml`, or `factcheck_output*.jsonl`.
 - Start a second vLLM if `scripts/start_*.sh` reports already running.
+- Bounce vLLM for Gym Python-only changes; bounce Gym only (`./scripts/stop_gym.sh`).

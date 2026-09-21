@@ -46,6 +46,18 @@ from nemo_gym.openai_utils import (
 
 
 _SESSION_COOKIE = "fact_checking_rm_dev_session"
+_THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+_UNCLOSED_THINK_RE = re.compile(r"<think>(.*)\Z", re.DOTALL)
+_NO_ERROR_CLAIM_RE = re.compile(
+    r"^(?:"
+    r"none(?:\s+found)?"
+    r"|n/?a"
+    r"|no(?:\s+factual)?\s+(?:inaccuracies|errors|issues)(?:\s+found)?"
+    r"|nothing\s+to\s+(?:report|list)"
+    r"|the\s+response\s+is\s+factually\s+correct"
+    r")\.?$",
+    re.IGNORECASE,
+)
 _TOKEN_RE = re.compile(r"[a-z0-9]+(?:'[a-z0-9]+)?")
 _QUERY_STOPWORDS = {
     "a",
@@ -245,8 +257,11 @@ class RubricEvaluation(BaseModel):
     expected_error: str
     judge_prompt: str
     judge_response: str
+    judge_reasoning: Optional[str] = None
     verdict: str
     score: float
+    judge_s: Optional[float] = None
+    judge_attempts: Optional[int] = None
 
 
 class SearchWikiRequest(BaseModel):
@@ -273,6 +288,10 @@ class FactCheckingRewardModelVerifyResponse(BaseVerifyResponse):
     num_errors: int
     predicted_severity: float
     severity_reward: float
+    judge_evaluations: Optional[List[RubricEvaluation]] = None
+    count_judge_response: Optional[str] = None
+    count_judge_reasoning: Optional[str] = None
+    timings: Optional[dict] = None
 
 
 class FactCheckingRewardModelDevConfig(BaseResourcesServerConfig):
@@ -306,6 +325,15 @@ class FactCheckingRewardModelDevConfig(BaseResourcesServerConfig):
     num_errors_judge_prompt_template: str = Field(
         default=NUM_ERRORS_JUDGE_PROMPT_TEMPLATE,
         description="Template for the error-count judge prompt.",
+    )
+    judge_empty_retries: int = Field(
+        default=2,
+        ge=0,
+        description=(
+            "Extra judge generations when the scored judge text has no [[YES]]/[[NO]] "
+            "(or no <num_errors> for the count judge). Truncated think often parses "
+            "empty and would otherwise default to NO / 20."
+        ),
     )
     corpus_db_path: Optional[str] = Field(
         default=None,
@@ -487,6 +515,7 @@ class FactCheckingRewardModelDevResourcesServer(SimpleResourcesServer):
     _milvus_lock: Optional[threading.Lock] = None
     _session_contexts: dict = {}
     _session_sample_ids: dict = {}
+    _sample_search_timings: dict = {}
     _search_log_file: Optional[io.TextIOWrapper] = None
     _search_log_lock: Optional[threading.Lock] = None
 
@@ -754,22 +783,151 @@ class FactCheckingRewardModelDevResourcesServer(SimpleResourcesServer):
         return self._tantivy_searchers[idx], self._tantivy_searcher_locks[idx]
 
     @staticmethod
-    def _extract_text_from_response(response: NeMoGymResponse) -> str:
+    def _assistant_message_text(response: NeMoGymResponse) -> str:
         for output in reversed(response.output):
-            if getattr(output, "type", None) == "message" and getattr(output, "role", None) == "assistant":
-                content = getattr(output, "content", None)
-                texts: list[str] = []
-                if isinstance(content, list):
-                    for c in content:
-                        text = getattr(c, "text", None)
-                        if isinstance(text, str):
-                            texts.append(text)
-                elif isinstance(content, str):
-                    texts = [content]
-                if texts:
-                    full_text = "\n".join(texts).strip()
-                    return full_text.split("</think>")[-1].strip()
+            if getattr(output, "type", None) != "message" or getattr(output, "role", None) != "assistant":
+                continue
+            content = getattr(output, "content", None)
+            texts: list[str] = []
+            if isinstance(content, list):
+                for c in content:
+                    text = getattr(c, "text", None)
+                    if isinstance(text, str):
+                        texts.append(text)
+            elif isinstance(content, str):
+                texts = [content]
+            if texts:
+                return "\n".join(texts).strip()
         return ""
+
+    @staticmethod
+    def _strip_think_tags(text: str) -> str:
+        if not text:
+            return ""
+        cleaned = _THINK_RE.sub("", text)
+        cleaned = _UNCLOSED_THINK_RE.sub("", cleaned)
+        return cleaned.strip()
+
+    @staticmethod
+    def _think_bodies(text: str) -> str:
+        if not text:
+            return ""
+        bodies = [b.strip() for b in _THINK_RE.findall(text) if b.strip()]
+        if bodies:
+            return "\n".join(bodies)
+        unclosed = _UNCLOSED_THINK_RE.search(text)
+        if unclosed and unclosed.group(1).strip():
+            return unclosed.group(1).strip()
+        return ""
+
+    @staticmethod
+    def _extract_text_from_response(
+        response: NeMoGymResponse, *, include_reasoning: bool = False
+    ) -> str:
+        full_text = FactCheckingRewardModelDevResourcesServer._assistant_message_text(
+            response
+        )
+        if full_text:
+            return full_text.split("</think>")[-1].strip()
+        if include_reasoning:
+            reasoning = FactCheckingRewardModelDevResourcesServer._extract_reasoning_from_response(
+                response
+            )
+            if reasoning:
+                return reasoning
+        return ""
+
+    @staticmethod
+    def _extract_reasoning_from_response(response: NeMoGymResponse) -> str:
+        texts: list[str] = []
+        for output in response.output:
+            if getattr(output, "type", None) != "reasoning":
+                continue
+            summaries = getattr(output, "summary", None) or []
+            for part in summaries:
+                text = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
+                if isinstance(text, str) and text.strip():
+                    texts.append(text.strip())
+        message = FactCheckingRewardModelDevResourcesServer._assistant_message_text(
+            response
+        )
+        think = FactCheckingRewardModelDevResourcesServer._think_bodies(message)
+        if think and think not in texts:
+            texts.append(think)
+        return "\n".join(texts).strip()
+
+    def _scored_judge_text(self, message: str, reasoning: str) -> str:
+        parts = []
+        if message and message.strip():
+            parts.append(message.strip())
+        if reasoning and reasoning.strip() and reasoning.strip() not in parts:
+            parts.append(reasoning.strip())
+        return "\n".join(parts)
+
+    def _has_yes_no_label(self, text: str) -> bool:
+        return (
+            self.config.rubric_yes_label in text or self.config.rubric_no_label in text
+        )
+
+    @staticmethod
+    def _parse_num_errors(text: str) -> Optional[int]:
+        if not text or not str(text).strip():
+            return None
+        tagged = re.search(
+            r"<num_errors>\s*(-?\d+)\s*</num_errors>", text, flags=re.IGNORECASE
+        )
+        if tagged:
+            return int(tagged.group(1))
+        last = text.strip().split("\n")[-1].strip()
+        if re.fullmatch(r"-?\d+", last):
+            return int(last)
+        return None
+
+    @staticmethod
+    def _count_predicted_error_lines(predicted: str) -> int:
+        lines = []
+        for raw in predicted.splitlines():
+            line = re.sub(r"^[\s\-*•]+", "", raw).strip()
+            if line:
+                lines.append(line)
+        return len(lines)
+
+    @staticmethod
+    def _looks_like_no_errors_claim(predicted: str) -> bool:
+        lines = []
+        for raw in predicted.splitlines():
+            line = re.sub(r"^[\s\-*•]+", "", raw).strip()
+            if line:
+                lines.append(line)
+        if len(lines) != 1:
+            return False
+        return bool(_NO_ERROR_CLAIM_RE.match(lines[0]))
+
+    def _predicted_num_errors(self, predicted: str, *, gold_empty: bool) -> int:
+        if not predicted or not predicted.strip():
+            return 0
+        if gold_empty and self._looks_like_no_errors_claim(predicted):
+            return 0
+        return self._count_predicted_error_lines(predicted)
+
+    async def _post_judge(self, prompt: str) -> NeMoGymResponse:
+        request_params = self.config.judge_responses_create_params.model_copy(deep=True)
+        request_params.input = [NeMoGymEasyInputMessage(role="user", content=prompt)]
+        response_obj = await self.server_client.post(
+            server_name=self.config.judge_model_server.name,
+            url_path="/v1/responses",
+            json=request_params,
+        )
+        return NeMoGymResponse.model_validate(await response_obj.json())
+
+    async def _generate_judge_turn(self, prompt: str) -> tuple[str, str]:
+        response = await self._post_judge(prompt)
+        raw = self._assistant_message_text(response)
+        message = self._strip_think_tags(raw)
+        reasoning = self._extract_reasoning_from_response(response)
+        if not message and not reasoning and raw:
+            reasoning = raw
+        return message, reasoning
 
     @staticmethod
     def _extract_verdict(response_text: str, yes_label: str, no_label: str) -> str:
@@ -861,6 +1019,56 @@ class FactCheckingRewardModelDevResourcesServer(SimpleResourcesServer):
             return content if isinstance(content, str) else None
         except Exception:
             return None
+
+    def _record_search_timing(self, sample_id: Optional[str], entry: dict) -> None:
+        if not sample_id:
+            return
+        self._sample_search_timings.setdefault(sample_id, []).append(entry)
+
+    def _pop_search_timings(self, sample_id: Optional[str]) -> list:
+        if not sample_id:
+            return []
+        return self._sample_search_timings.pop(sample_id, [])
+
+    def _verify_timings(
+        self,
+        body: FactCheckingRewardModelVerifyRequest,
+        *,
+        verify_s: float,
+        judge_yes_no: Optional[list] = None,
+        judge_yes_no_s: Optional[float] = None,
+        judge_count_s: Optional[float] = None,
+        judge_count_attempts: Optional[int] = None,
+    ) -> dict:
+        sample_id = str(body.id) if getattr(body, "id", None) is not None else None
+        searches = self._pop_search_timings(sample_id)
+        return {
+            "verify_s": round(verify_s, 4),
+            "judge_yes_no_s": None if judge_yes_no_s is None else round(judge_yes_no_s, 4),
+            "judge_yes_no": judge_yes_no or [],
+            "judge_count_s": None if judge_count_s is None else round(judge_count_s, 4),
+            "judge_count_attempts": judge_count_attempts,
+            "searches": searches,
+            "embed_s": round(sum(float(s.get("embed_s") or 0.0) for s in searches), 4),
+            "milvus_s": round(sum(float(s.get("milvus_s") or 0.0) for s in searches), 4),
+            "search_retrieval_s": round(
+                sum(float(s.get("retrieval_s") or 0.0) for s in searches), 4
+            ),
+            "search_cached": sum(1 for s in searches if s.get("cached")),
+            "judges_wall_s": round(
+                max(
+                    [
+                        x
+                        for x in (judge_yes_no_s, judge_count_s)
+                        if x is not None
+                    ]
+                    or [0.0]
+                ),
+                4,
+            )
+            if judge_yes_no_s is not None or judge_count_s is not None
+            else None,
+        }
 
     def _log_search(
         self,
@@ -1008,10 +1216,11 @@ class FactCheckingRewardModelDevResourcesServer(SimpleResourcesServer):
         self._search_cache_put(cache_key, hits)
         return [dict(hit) for hit in hits]
 
-    def _milvus_search(self, query: str, k: int) -> list[dict]:
+    def _milvus_search(self, query: str, k: int) -> tuple[list[dict], dict]:
+        timing = {"cached": False, "embed_s": 0.0, "milvus_s": 0.0}
         normalized_query = query.strip()
         if not normalized_query or k <= 0:
-            return []
+            return [], timing
 
         candidate_k = max(k, k * self.config.milvus_candidate_multiplier)
         cache_key = (
@@ -1025,7 +1234,8 @@ class FactCheckingRewardModelDevResourcesServer(SimpleResourcesServer):
         )
         cached = self._search_cache_get(cache_key)
         if cached is not None:
-            return cached
+            timing["cached"] = True
+            return cached, timing
 
         if (
             self._milvus_client is None
@@ -1035,6 +1245,7 @@ class FactCheckingRewardModelDevResourcesServer(SimpleResourcesServer):
             raise RuntimeError("Milvus retrieval is not initialized.")
 
         with self._milvus_lock:
+            t_embed = time.monotonic()
             encode_query = getattr(self._milvus_encoder, "encode_query", None)
             if encode_query is not None:
                 query_vector = encode_query(normalized_query, convert_to_numpy=True)
@@ -1044,9 +1255,11 @@ class FactCheckingRewardModelDevResourcesServer(SimpleResourcesServer):
                     convert_to_numpy=True,
                 )
             vector = query_vector.tolist()
+            timing["embed_s"] = time.monotonic() - t_embed
             if not vector or not all(math.isfinite(float(value)) for value in vector):
                 raise RuntimeError("Milvus query encoder returned a non-finite vector.")
 
+        t_mv = time.monotonic()
         results = self._milvus_client.search(
             collection_name=self.config.milvus_collection_name,
             data=[vector],
@@ -1055,6 +1268,7 @@ class FactCheckingRewardModelDevResourcesServer(SimpleResourcesServer):
             output_fields=["orig_id", "text"],
             search_params={"search_list": self.config.milvus_search_list},
         )
+        timing["milvus_s"] = time.monotonic() - t_mv
 
         raw_hits = results[0] if results else []
         hits: list[dict] = []
@@ -1081,7 +1295,7 @@ class FactCheckingRewardModelDevResourcesServer(SimpleResourcesServer):
                 break
 
         self._search_cache_put(cache_key, hits)
-        return [dict(hit) for hit in hits]
+        return [dict(hit) for hit in hits], timing
 
     def _fetch_corpus_rows(self, docids: list[str], fetch_chars: int) -> dict[str, tuple[str, str]]:
         if not docids:
@@ -1176,15 +1390,28 @@ class FactCheckingRewardModelDevResourcesServer(SimpleResourcesServer):
                     body.query,
                     self.config.search_top_k,
                 )
+                search_timing = {"cached": False, "embed_s": 0.0, "milvus_s": 0.0}
             elif backend == "milvus":
-                hits = await asyncio.to_thread(
+                hits, search_timing = await asyncio.to_thread(
                     self._milvus_search,
                     body.query,
                     self.config.search_top_k,
                 )
             else:
                 raise RuntimeError(f"Unsupported retrieval_backend={self.config.retrieval_backend!r}")
-            retrieval_ms = (time.monotonic() - t0) * 1000
+            retrieval_s = time.monotonic() - t0
+            retrieval_ms = retrieval_s * 1000
+            self._record_search_timing(
+                sample_id,
+                {
+                    "query": body.query,
+                    "backend": backend,
+                    "cached": bool(search_timing.get("cached")),
+                    "embed_s": round(float(search_timing.get("embed_s") or 0.0), 4),
+                    "milvus_s": round(float(search_timing.get("milvus_s") or 0.0), 4),
+                    "retrieval_s": round(retrieval_s, 4),
+                },
+            )
 
             if not hits:
                 self._log_search(
@@ -1244,17 +1471,19 @@ class FactCheckingRewardModelDevResourcesServer(SimpleResourcesServer):
             expected_error=expected_error,
             predicted_errors=predicted_factual_errors,
         )
-        request_params = self.config.judge_responses_create_params.model_copy(deep=True)
-        request_params.input = [NeMoGymEasyInputMessage(role="user", content=judge_prompt)]
-        response_obj = await self.server_client.post(
-            server_name=self.config.judge_model_server.name,
-            url_path="/v1/responses",
-            json=request_params,
-        )
-        judge_response_obj = NeMoGymResponse.model_validate(await response_obj.json())
-        judge_response = self._extract_text_from_response(judge_response_obj)
+        attempts = 1 + int(self.config.judge_empty_retries)
+        judge_response = ""
+        judge_reasoning = ""
+        used_attempts = 0
+        t0 = time.monotonic()
+        for used_attempts in range(1, attempts + 1):
+            judge_response, judge_reasoning = await self._generate_judge_turn(judge_prompt)
+            scored = self._scored_judge_text(judge_response, judge_reasoning)
+            if self._has_yes_no_label(scored):
+                break
+        scored = self._scored_judge_text(judge_response, judge_reasoning)
         verdict = self._extract_verdict(
-            judge_response,
+            scored,
             self.config.rubric_yes_label,
             self.config.rubric_no_label,
         )
@@ -1262,38 +1491,50 @@ class FactCheckingRewardModelDevResourcesServer(SimpleResourcesServer):
         return RubricEvaluation(
             expected_error=expected_error,
             judge_prompt=judge_prompt,
-            judge_response=judge_response,
+            judge_response=scored,
+            judge_reasoning=judge_reasoning or None,
             verdict=verdict,
             score=score,
+            judge_s=round(time.monotonic() - t0, 4),
+            judge_attempts=used_attempts,
         )
 
-    async def _evaluate_num_errors(
-        self, expected_errors: str, predicted_factual_errors: str
-    ) -> int:
-        judge_prompt = self.config.num_errors_judge_prompt_template.format(
-            expected_errors=expected_errors,
-            predicted_errors=predicted_factual_errors,
-        )
-        request_params = self.config.judge_responses_create_params.model_copy(deep=True)
-        request_params.input = [NeMoGymEasyInputMessage(role="user", content=judge_prompt)]
-        response_obj = await self.server_client.post(
-            server_name=self.config.judge_model_server.name,
-            url_path="/v1/responses",
-            json=request_params,
-        )
-        judge_response_obj = NeMoGymResponse.model_validate(await response_obj.json())
-        judge_response = self._extract_text_from_response(judge_response_obj)
-        try:
-            return int(judge_response.split("<num_errors>")[-1].split("</num_errors>")[0].strip())
-        except Exception:
-            return 20
+    async def _evaluate_yes_no_errors(
+        self, expected_errors: list[str], predicted_factual_errors: str
+    ) -> tuple[list[RubricEvaluation], float]:
+        t0 = time.monotonic()
+        if not expected_errors:
+            return [], 0.0
+        if self.config.rubric_parallel_evaluation and len(expected_errors) > 1:
+            evaluations = list(
+                await asyncio.gather(
+                    *[
+                        self._evaluate_single_error(err, predicted_factual_errors)
+                        for err in expected_errors
+                    ]
+                )
+            )
+        else:
+            evaluations = []
+            for err in expected_errors:
+                evaluations.append(
+                    await self._evaluate_single_error(err, predicted_factual_errors)
+                )
+        return evaluations, time.monotonic() - t0
 
     async def verify(
         self, body: FactCheckingRewardModelVerifyRequest
     ) -> FactCheckingRewardModelVerifyResponse:
+        verify_t0 = time.monotonic()
         output = self._extract_text_from_response(body.response)
 
         expected_errors = [x for x in body.expected_errors if x.strip()]
+        evaluations = None
+        count_judge_response = None
+        count_judge_reasoning = None
+        judge_yes_no_s = None
+        judge_count_s = None
+        judge_count_attempts = None
 
         m = re.search(
             r"\[Beginning of Factual Errors\](.*?)\[End of Factual Errors\]",
@@ -1301,25 +1542,19 @@ class FactCheckingRewardModelDevResourcesServer(SimpleResourcesServer):
             re.DOTALL,
         )
         if not m:
-            # An incomplete agent trajectory made no final factual-error claim.
-            # Score it as predicting an empty error list (severity 1), rather
-            # than conflating a tool-loop/format failure with an asserted error.
+            # Incomplete trajectory: no [Factual Errors] block. That is a format
+            # miss, not a claim of "no errors".
             factual_severity = 1.0
-            f1_score = 1.0 if not expected_errors else 0.0
+            f1_score = 0.0
+            num_errors = 0
             severity_reward = (
                 1.0 if body.hallucination_severity == factual_severity else 0.0
             )
-            result = FactCheckingRewardModelVerifyResponse(
-                **body.model_dump(),
-                reward=float(
-                    self.config.factuality_weight * f1_score
-                    + self.config.severity_weight * severity_reward
-                ),
-                factuality_f1_score=f1_score,
-                predicted_severity=factual_severity,
-                severity_reward=severity_reward,
-                num_errors=0,
+            reward = float(
+                self.config.factuality_weight * f1_score
+                + self.config.severity_weight * severity_reward
             )
+            predicted_severity = factual_severity
         else:
             predicted_factual_errors = m.group(1).strip()
             if not predicted_factual_errors and len(expected_errors) > 0:
@@ -1329,26 +1564,18 @@ class FactCheckingRewardModelDevResourcesServer(SimpleResourcesServer):
                 f1_score = 1.0
                 num_errors = 0
             else:
-                if self.config.rubric_parallel_evaluation and len(expected_errors) > 1:
-                    evaluations = await asyncio.gather(
-                        *[
-                            self._evaluate_single_error(err, predicted_factual_errors)
-                            for err in expected_errors
-                        ]
-                    )
-                else:
-                    evaluations = []
-                    for err in expected_errors:
-                        evaluations.append(
-                            await self._evaluate_single_error(err, predicted_factual_errors)
-                        )
-
-                scores = [e.score for e in evaluations]
-                num_errors = await self._evaluate_num_errors(
-                    "\n\n".join(expected_errors), predicted_factual_errors
+                num_errors = self._predicted_num_errors(
+                    predicted_factual_errors, gold_empty=not expected_errors
                 )
-                
-                if len(expected_errors) > 0:
+                count_judge_response = "line_count"
+                count_judge_reasoning = None
+                judge_count_s = 0.0
+                judge_count_attempts = 0
+                if expected_errors:
+                    evaluations, judge_yes_no_s = await self._evaluate_yes_no_errors(
+                        expected_errors, predicted_factual_errors
+                    )
+                    scores = [e.score for e in evaluations]
                     f1_score = self._aggregate_scores(
                         scores=scores,
                         num_predicted_errors=num_errors,
@@ -1356,29 +1583,59 @@ class FactCheckingRewardModelDevResourcesServer(SimpleResourcesServer):
                         beta=self.config.f_beta,
                     )
                 else:
-                    f1_score = 0.0
+                    evaluations = []
+                    judge_yes_no_s = 0.0
+                    # Empty gold: F1 is 1 iff predicted N is 0. "None found"
+                    # paraphrases count as 0 without a count LLM.
+                    f1_score = 1.0 if num_errors == 0 else 0.0
 
             factual_severity = self._extract_factual_severity(output)
+            predicted_severity = factual_severity
             expected_severity = body.hallucination_severity
             if expected_severity == factual_severity:
                 severity_reward = 1.0
             else:
                 severity_reward = 0.0
             reward = self.config.factuality_weight * f1_score + self.config.severity_weight * severity_reward
-            result = FactCheckingRewardModelVerifyResponse(
-                **body.model_dump(),
-                reward=float(reward),
-                factuality_f1_score=f1_score,
-                num_errors=num_errors,
-                predicted_severity=factual_severity,
-                severity_reward=severity_reward,
-            )
+
+        judge_yes_no = None
+        if evaluations:
+            judge_yes_no = [
+                {
+                    "expected_error": e.expected_error,
+                    "verdict": e.verdict,
+                    "s": e.judge_s,
+                    "attempts": e.judge_attempts,
+                }
+                for e in evaluations
+            ]
+
+        result = FactCheckingRewardModelVerifyResponse(
+            **body.model_dump(),
+            reward=float(reward),
+            factuality_f1_score=f1_score,
+            num_errors=num_errors,
+            predicted_severity=predicted_severity,
+            severity_reward=severity_reward,
+            judge_evaluations=evaluations,
+            count_judge_response=count_judge_response,
+            count_judge_reasoning=count_judge_reasoning or None,
+            timings=self._verify_timings(
+                body,
+                verify_s=time.monotonic() - verify_t0,
+                judge_yes_no=judge_yes_no,
+                judge_yes_no_s=judge_yes_no_s,
+                judge_count_s=judge_count_s,
+                judge_count_attempts=judge_count_attempts,
+            ),
+        )
 
         if len(self._session_contexts) > 10_000:
             oldest = list(self._session_contexts.keys())[: len(self._session_contexts) - 10_000]
             for k in oldest:
                 self._session_contexts.pop(k, None)
                 self._session_sample_ids.pop(k, None)
+                self._sample_search_timings.pop(k, None)
         return result
 
 

@@ -13,6 +13,8 @@ fi
 
 echo "== Gym venv (Python 3.12+) =="
 cd "$GYM_ROOT"
+# setuptools egg_base is gym/cache (see [tool.distutils.egg_info] in pyproject.toml)
+mkdir -p "$GYM_ROOT/cache"
 if [[ ! -x "$GYM_ROOT/.venv/bin/python" ]]; then
   uv venv --python 3.12
 fi

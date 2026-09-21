@@ -3,6 +3,8 @@
 .env.*
 .hf_token
 **/env.yaml
+gym/milvus_override.yaml
+gym/tavily_override.yaml
 tavily_cache.json
 *.pid
 
