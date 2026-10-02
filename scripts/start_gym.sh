@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Start NeMo Gym servers for fact-checking (Milvus backend by default).
+# BACKEND=exa uses Exa /search instead of embeddings + Milvus.
+# BACKEND=tavily uses the older Tavily reward server.
 set -euo pipefail
 # shellcheck source=common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
@@ -20,6 +22,12 @@ if [[ "$BACKEND" == "milvus" ]]; then
     echo "Wrote $OVERRIDE — edit milvus_uri before relying on retrieval."
   fi
   CONFIG_EXTRA="resources_servers/fact_checking_reward_model_dev/configs/fact_checking_reward_model_dev.yaml,milvus_override.yaml"
+elif [[ "$BACKEND" == "exa" ]]; then
+  if [[ -z "${EXA_API_KEY:-}" ]]; then
+    echo "EXA_API_KEY is required for BACKEND=exa" >&2
+    exit 1
+  fi
+  CONFIG_EXTRA="resources_servers/fact_checking_reward_model_dev/configs/fact_checking_reward_model_exa.yaml"
 elif [[ "$BACKEND" == "tavily" ]]; then
   if [[ -z "${TAVILY_API_KEY:-}" ]]; then
     echo "TAVILY_API_KEY is required for BACKEND=tavily" >&2
@@ -31,7 +39,7 @@ elif [[ "$BACKEND" == "tavily" ]]; then
   fi
   CONFIG_EXTRA="resources_servers/fact_checking_reward_model_tavily/configs/fact_checking_reward_model_tavily.yaml,tavily_override.yaml"
 else
-  echo "BACKEND must be milvus or tavily" >&2
+  echo "BACKEND must be milvus, exa, or tavily" >&2
   exit 1
 fi
 

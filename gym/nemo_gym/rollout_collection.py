@@ -63,7 +63,7 @@ TIMING_BREAKDOWN_STEPS = (
     ("count_judge", "judge_count_s", "Count (line-count)"),
     ("yes_no_matcher", "judge_yes_no_s", "YES/NO matcher"),
     ("policy_generate", "policy_generate_s", "Policy generate"),
-    ("search", "search_wiki_http_s", "Search (embed + Milvus + HTTP)"),
+    ("search", "search_wiki_http_s", "Search (search_wiki HTTP)"),
     ("seed", "seed_session_s", "Seed"),
 )
 

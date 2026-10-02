@@ -45,6 +45,40 @@ from nemo_gym.server_utils import raise_for_status
 _POLICY_STEP_TIMINGS: dict = {}
 
 
+# Learnings from the Chris Rock and Veza probes: a keyword string lands in the
+# generic neighborhood, and a reasoning trace is a bad query. A short passage
+# that restates known clues and leaves the unknown as a placeholder is what
+# moved the Veza authorization page into the top 3. Do not fill in the answer.
+HYDE_SEARCH_INSTRUCTION = (
+    "When you call search_wiki, the query must be one short hypothetical "
+    "document passage, not a keyword list.\n"
+    "Restate only clues already written in the question or in the claim you "
+    "are checking.\n"
+    "If a detail is the fact you are trying to verify, leave it as a bracket "
+    "placeholder such as [NAME], [YEAR], [METHOD], or [CHANNEL].\n"
+    "Do not guess the answer. Do not add dates, titles, award categories, "
+    "mechanisms, or other specific facts that are not already stated.\n"
+    "The query value is only that passage. Do not include a thinking process, "
+    "a plan, or an explanation.\n"
+    "Example: a claim that a named person won a first award in a stated year "
+    "becomes \"[NAME] won a first award in [YEAR].\" The stated year stays out "
+    "of the passage. A claim that a product detects a change with a named "
+    "technique and reports it through a named channel becomes \"The product "
+    "detects the change with [METHOD] and surfaces it through [CHANNEL].\""
+)
+
+HYDE_TOOL_DESCRIPTION = (
+    "Search the corpus with one short hypothetical document passage. "
+    "Restate only known clues. Leave the unknown answer as a placeholder "
+    "such as [YEAR], [NAME], [METHOD], or [CHANNEL]. Do not guess the answer."
+)
+
+HYDE_QUERY_DESCRIPTION = (
+    "One short passage. Clues from the claim only. Unknowns as [YEAR], "
+    "[NAME], [METHOD], or [CHANNEL]. No keyword list and no reasoning."
+)
+
+
 def normalize_search_query(arguments) -> str:
     """Lowercased, whitespace-collapsed search_wiki query, or empty."""
     raw = arguments
@@ -56,6 +90,64 @@ def normalize_search_query(arguments) -> str:
     if not isinstance(raw, dict):
         return ""
     return " ".join(str(raw.get("query") or "").split()).lower()
+
+
+def _tool_dict(tool):
+    if isinstance(tool, dict):
+        return json.loads(json.dumps(tool))
+    if hasattr(tool, "model_dump"):
+        return tool.model_dump()
+    return json.loads(json.dumps(dict(tool)))
+
+
+def _rewrite_search_tool(tool):
+    data = _tool_dict(tool)
+    name = data.get("name")
+    function = data.get("function") if isinstance(data.get("function"), dict) else None
+    if name is None and function is not None:
+        name = function.get("name")
+    if name != "search_wiki":
+        return tool
+    if function is not None:
+        function["description"] = HYDE_TOOL_DESCRIPTION
+        parameters = function.get("parameters")
+    else:
+        data["description"] = HYDE_TOOL_DESCRIPTION
+        parameters = data.get("parameters")
+    if isinstance(parameters, dict):
+        query = (parameters.get("properties") or {}).get("query")
+        if isinstance(query, dict):
+            query["description"] = HYDE_QUERY_DESCRIPTION
+    return data
+
+
+def apply_hyde_search_prompt(body):
+    """Tell the policy to put a HyDE passage in search_wiki, not a keyword string."""
+    tools = [_rewrite_search_tool(tool) for tool in (body.tools or [])]
+    new_input = []
+    appended = False
+    for item in body.input:
+        content = getattr(item, "content", None)
+        role = getattr(item, "role", None)
+        if (
+            not appended
+            and role == "user"
+            and isinstance(content, str)
+        ):
+            item = item.model_copy(
+                update={"content": content.rstrip() + "\n\n" + HYDE_SEARCH_INSTRUCTION}
+            )
+            appended = True
+        new_input.append(item)
+    if not appended:
+        new_input.append(
+            NeMoGymEasyInputMessage(
+                role="user",
+                content=HYDE_SEARCH_INSTRUCTION,
+                type="message",
+            )
+        )
+    return body.model_copy(update={"input": new_input, "tools": tools})
 
 
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
@@ -76,6 +168,9 @@ class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     # loop stops and force_final_step_tool_choice can write the verdict.
     max_search_calls: Optional[int] = None
     skip_duplicate_search_queries: bool = True
+    # Ask the policy to send a HyDE passage as the search_wiki query.
+    # Applies to whichever retrieval backend that tool calls.
+    hyde_search_queries: bool = False
 
 
 class SimpleAgentRunRequest(BaseRunRequest):
@@ -103,6 +198,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
+
+        if self.config.hyde_search_queries:
+            body = apply_hyde_search_prompt(body)
 
         if body.max_output_tokens is None and self.config.default_max_output_tokens:
             body = body.model_copy(

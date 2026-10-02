@@ -55,6 +55,7 @@ fact_checking_reward_model_dev_simple_agent:
       max_steps: 10
       max_search_calls: 3
       skip_duplicate_search_queries: true
+      hyde_search_queries: true
       force_first_step_tool_choice: required
       force_final_step_tool_choice: none
       # Dataset JSONL leaves max_output_tokens null. Cap each policy turn so a

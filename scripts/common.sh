@@ -13,3 +13,8 @@ fi
 export HF_TOKEN
 export HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-$HF_TOKEN}"
 export HF_HUB_DISABLE_XET=1
+export EXA_API_KEY="${EXA_API_KEY:-}"
+if [[ -z "$EXA_API_KEY" && -f "$FACTCHECK_ROOT/.exa_api_key" ]]; then
+  EXA_API_KEY="$(tr -d '\n' < "$FACTCHECK_ROOT/.exa_api_key")"
+fi
+export EXA_API_KEY

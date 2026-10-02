@@ -1,6 +1,6 @@
 # NeMo Gym fact-checking harness
 
-End-to-end setup for NVIDIA **NeMo Gym** fact-checking rollouts: a policy model, a checker/judge, EmbeddingGemma query embeddings, and either **Milvus** or **Tavily** behind `search_wiki`.
+End-to-end setup for NVIDIA **NeMo Gym** fact-checking rollouts: a policy model, a checker/judge, and `search_wiki` backed by EmbeddingGemma + **Milvus**, **Exa**, or **Tavily**.
 
 This repository is a snapshot of [NVIDIA-NeMo/Gym](https://github.com/NVIDIA-NeMo/Gym) (`gym/`, Apache-2.0) plus launch scripts, example configs, and a Cursor Agent Skill. Gym is patched for this harness: optional OpenAI-compatible embeddings (`milvus_embedding_base_url`), policy search cap, line-count `num_errors`, per-sample step timings, and YES/NO-only judging.
 
@@ -150,6 +150,26 @@ BACKEND=tavily ./scripts/collect_rollouts.sh
 
 Scores will **not** match FineWeb/Milvus retrieval. Same `search_wiki` tool, different evidence.
 
+## Exa instead of embeddings + Milvus
+
+Same policy, checker, and F1 scorer as the Milvus run. `search_wiki` POSTs the query to `https://api.exa.ai/search` and returns page text. No EmbeddingGemma and no Milvus. Gold is the same audited set, `data/rlhf24_final_audited_dataset.jsonl` (`expected_errors` / `hallucination_severity` on each row).
+
+Agent name: `fact_checking_reward_model_exa_simple_agent`. Defaults: Exa `type=auto`, `numResults` = `search_top_k` (3), up to 8000 characters of page text per hit.
+
+Stop the Milvus Gym process first (`./scripts/stop_gym.sh`). Leave policy `:8000` and checker `:8001` running. Embed `:8002` is unused.
+
+```bash
+export EXA_API_KEY=...
+BACKEND=exa ./scripts/start_gym.sh
+```
+
+Second terminal:
+
+```bash
+BACKEND=exa NUM_SAMPLES_IN_PARALLEL=2 ./scripts/collect_rollouts.sh
+# writes ./factcheck_output_exa.jsonl (appends; use a new OUTPUT_JSONL to keep runs apart)
+```
+
 ## Scripts
 
 | Script | Purpose |
@@ -158,7 +178,7 @@ Scores will **not** match FineWeb/Milvus retrieval. Same `search_wiki` tool, dif
 | `scripts/start_embed_gemma.sh` | GPU0 EmbeddingGemma `:8002` |
 | `scripts/start_vllm_policy_checker.sh` | GPU1/2 Nemotron `:8000` / `:8001` |
 | `scripts/check_endpoints.sh` | `curl` the three local HTTP APIs |
-| `scripts/start_gym.sh` | `ng_run` (set `BACKEND=tavily` to skip Milvus) |
+| `scripts/start_gym.sh` | `ng_run` (`BACKEND=milvus`, `BACKEND=exa`, or `BACKEND=tavily`) |
 | `scripts/stop_gym.sh` | Stop Gym only (leave vLLM/embed) |
 | `scripts/stop_vllm.sh` / `scripts/stop_servers.sh` | Stop vLLM / embed+vLLM |
 | `scripts/collect_rollouts.sh` | `ng_collect_rollouts` (`NUM_SAMPLES_IN_PARALLEL`, `INPUT_JSONL`, `OUTPUT_JSONL`) |

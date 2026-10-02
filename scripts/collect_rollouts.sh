@@ -5,14 +5,36 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 BACKEND="${BACKEND:-milvus}"
-INPUT="${INPUT_JSONL:-$FACTCHECK_ROOT/examples/factcheck_example.jsonl}"
-OUTPUT="${OUTPUT_JSONL:-$FACTCHECK_ROOT/factcheck_output.jsonl}"
 
 if [[ "$BACKEND" == "tavily" ]]; then
   AGENT="${AGENT_NAME:-fact_checking_reward_model_tavily_simple_agent}"
-else
+  DEFAULT_INPUT="$FACTCHECK_ROOT/examples/factcheck_example.jsonl"
+  DEFAULT_OUTPUT="$FACTCHECK_ROOT/factcheck_output.jsonl"
+elif [[ "$BACKEND" == "exa" ]]; then
+  AGENT="${AGENT_NAME:-fact_checking_reward_model_exa_simple_agent}"
+  DEFAULT_INPUT="$FACTCHECK_ROOT/data/rlhf24_final_audited_dataset.jsonl"
+  DEFAULT_OUTPUT="$FACTCHECK_ROOT/factcheck_output_exa.jsonl"
+elif [[ "$BACKEND" == "milvus" ]]; then
   AGENT="${AGENT_NAME:-fact_checking_reward_model_dev_simple_agent}"
+  DEFAULT_INPUT="$FACTCHECK_ROOT/examples/factcheck_example.jsonl"
+  DEFAULT_OUTPUT="$FACTCHECK_ROOT/factcheck_output.jsonl"
+else
+  echo "BACKEND must be milvus, exa, or tavily" >&2
+  exit 1
 fi
+
+# Paths are from the repo root. ng_collect_rollouts runs with cwd gym/.
+resolve_repo_path() {
+  local p="$1"
+  if [[ "$p" = /* ]]; then
+    printf '%s\n' "$p"
+  else
+    printf '%s\n' "$FACTCHECK_ROOT/${p#./}"
+  fi
+}
+
+INPUT="$(resolve_repo_path "${INPUT_JSONL:-$DEFAULT_INPUT}")"
+OUTPUT="$(resolve_repo_path "${OUTPUT_JSONL:-$DEFAULT_OUTPUT}")"
 
 # shellcheck disable=SC1091
 source "$GYM_ROOT/.venv/bin/activate"
@@ -29,5 +51,9 @@ COLLECT_ARGS=(
 if [[ -n "${NUM_SAMPLES_IN_PARALLEL:-}" ]]; then
   echo "num_samples_in_parallel=$NUM_SAMPLES_IN_PARALLEL"
   COLLECT_ARGS+=(+num_samples_in_parallel="$NUM_SAMPLES_IN_PARALLEL")
+fi
+if [[ -n "${LIMIT:-}" ]]; then
+  echo "limit=$LIMIT"
+  COLLECT_ARGS+=(+limit="$LIMIT")
 fi
 ng_collect_rollouts "${COLLECT_ARGS[@]}"

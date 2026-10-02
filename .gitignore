@@ -2,6 +2,7 @@
 .env
 .env.*
 .hf_token
+.exa_api_key
 **/env.yaml
 gym/milvus_override.yaml
 gym/tavily_override.yaml
@@ -22,6 +23,8 @@ outputs/
 *.log
 /tmp/
 factcheck_output*.jsonl
+!factcheck_output_exa_156.jsonl
+!factcheck_output_156.jsonl
 .cache/
 
 # OS

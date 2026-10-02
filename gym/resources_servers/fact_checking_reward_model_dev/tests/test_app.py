@@ -13,6 +13,7 @@ from resources_servers.fact_checking_reward_model_dev.app import (
     FactCheckingRewardModelDevConfig,
     FactCheckingRewardModelDevResourcesServer,
     FactCheckingRewardModelVerifyRequest,
+    SearchWikiRequest,
 )
 
 
@@ -407,3 +408,81 @@ class TestEmptyGoldVerify:
         assert len(prompts) == 1
         assert "<num_errors>" not in prompts[0]
         assert result.factuality_f1_score == 1.0
+
+
+class TestExaSearch:
+    def test_hits_use_page_text_and_skip_empty(self) -> None:
+        server = _make_server()
+        hits = server._exa_hits_from_payload(
+            {
+                "results": [
+                    {
+                        "url": "https://example.com/a",
+                        "title": "Paris",
+                        "text": "The capital is Paris.",
+                        "score": 0.4,
+                    },
+                    {
+                        "url": "https://example.com/b",
+                        "title": "Notes",
+                        "highlights": ["beta highlight"],
+                    },
+                    {"url": "https://example.com/empty", "title": "", "text": "  "},
+                    {
+                        "id": "no-url",
+                        "title": "Id only",
+                        "text": "fallback url",
+                    },
+                ]
+            },
+            k=5,
+        )
+
+        assert [hit["url"] for hit in hits] == [
+            "https://example.com/a",
+            "https://example.com/b",
+            "exa://no-url",
+        ]
+        assert hits[0]["text"] == "Paris\n\nThe capital is Paris."
+        assert hits[0]["score"] == 0.4
+        assert "beta highlight" in hits[1]["text"]
+        assert hits[0]["strategy"] == "exa_auto"
+
+    def test_search_wiki_returns_exa_pages_without_calling_the_judge(self) -> None:
+        server = _make_server()
+        server.config.retrieval_backend = "exa"
+        server.config.summarize_retrieval_results = False
+        server.server_client.post = AsyncMock()
+
+        def fake_search(query: str, k: int):
+            assert query == "capital of France"
+            assert k == server.config.search_top_k
+            return (
+                [
+                    {
+                        "url": "https://example.com/paris",
+                        "title": "Paris",
+                        "text": "Paris\n\nThe capital of France is Paris.",
+                        "score": 0.9,
+                        "strategy": "exa_auto",
+                    }
+                ],
+                {"cached": False, "embed_s": 0.0, "milvus_s": 0.0, "exa_s": 0.2},
+            )
+
+        server._exa_search = fake_search
+        request = MagicMock()
+        request.cookies.get.return_value = None
+        request.headers.get.return_value = "sample-1"
+
+        result = asyncio.run(
+            server.search_wiki(
+                request, SearchWikiRequest(query="capital of France")
+            )
+        )
+
+        assert "https://example.com/paris" in result.content
+        assert "The capital of France is Paris." in result.content
+        server.server_client.post.assert_not_called()
+        assert server._sample_search_timings["sample-1"][0]["backend"] == "exa"
+        assert server._sample_search_timings["sample-1"][0]["exa_s"] == 0.2

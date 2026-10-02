@@ -1,8 +1,8 @@
 """
 Self-contained fact-checking reward model resource server.
 
-Uses Tantivy search over the OpenResearcher corpus or semantic search over an
-external Milvus collection (no GPU needed by default).
+Uses Tantivy search over the OpenResearcher corpus, semantic search over an
+external Milvus collection, or Exa web search (no local embeddings).
 The original user query and policy response can optionally be threaded
 to the judge via HTTP cookies for context-aware summarization.
 """
@@ -361,7 +361,7 @@ class FactCheckingRewardModelDevConfig(BaseResourcesServerConfig):
     )
     retrieval_backend: str = Field(
         default="tantivy",
-        description="Retrieval backend: 'none', 'tantivy', or 'milvus'.",
+        description="Retrieval backend: 'none', 'tantivy', 'milvus', or 'exa'.",
     )
     tantivy_index_dir: Optional[str] = Field(
         default=None,
@@ -424,6 +424,28 @@ class FactCheckingRewardModelDevConfig(BaseResourcesServerConfig):
         default=4,
         gt=0,
         description="Retrieve this multiple of top-k before exact-text deduplication.",
+    )
+    exa_api_key: str = Field(
+        default="",
+        description="Exa API key. Set EXA_API_KEY when retrieval_backend is 'exa'.",
+    )
+    exa_base_url: str = Field(
+        default="https://api.exa.ai",
+        description="Exa API origin. search_wiki POSTs {base}/search.",
+    )
+    exa_search_type: str = Field(
+        default="auto",
+        description="Exa search type: auto, neural, fast, keyword, or deep.",
+    )
+    exa_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0.0,
+        description="Timeout for one Exa /search HTTP call.",
+    )
+    exa_max_characters: int = Field(
+        default=8000,
+        gt=0,
+        description="Max page-text characters requested from Exa per result.",
     )
     use_context_aware_prompt: bool = Field(
         default=False,
@@ -539,6 +561,17 @@ class FactCheckingRewardModelDevResourcesServer(SimpleResourcesServer):
         elif backend == "milvus":
             self._setup_milvus()
             self._search_cache_lock = threading.Lock()
+        elif backend == "exa":
+            if not (self.config.exa_api_key or "").strip():
+                raise RuntimeError(
+                    "exa_api_key is empty. Export EXA_API_KEY before "
+                    "BACKEND=exa ./scripts/start_gym.sh."
+                )
+            self._search_cache_lock = threading.Lock()
+            print(
+                f"[dev] Exa search enabled type={self.config.exa_search_type} "
+                f"endpoint={self.config.exa_base_url.rstrip('/')}/search"
+            )
         elif backend == "none":
             pass
         else:
@@ -1051,6 +1084,7 @@ class FactCheckingRewardModelDevResourcesServer(SimpleResourcesServer):
             "searches": searches,
             "embed_s": round(sum(float(s.get("embed_s") or 0.0) for s in searches), 4),
             "milvus_s": round(sum(float(s.get("milvus_s") or 0.0) for s in searches), 4),
+            "exa_s": round(sum(float(s.get("exa_s") or 0.0) for s in searches), 4),
             "search_retrieval_s": round(
                 sum(float(s.get("retrieval_s") or 0.0) for s in searches), 4
             ),
@@ -1215,6 +1249,135 @@ class FactCheckingRewardModelDevResourcesServer(SimpleResourcesServer):
         hits = hits[:k]
         self._search_cache_put(cache_key, hits)
         return [dict(hit) for hit in hits]
+
+    @staticmethod
+    def _exa_result_text(result: dict) -> str:
+        text = result.get("text")
+        if isinstance(text, str) and text.strip():
+            body = text.strip()
+        else:
+            highlights = result.get("highlights") or []
+            if isinstance(highlights, list):
+                body = "\n".join(
+                    str(item).strip() for item in highlights if str(item).strip()
+                )
+            else:
+                body = ""
+        title = str(result.get("title") or "").strip()
+        if title and body:
+            return f"{title}\n\n{body}"
+        return title or body
+
+    def _exa_hits_from_payload(self, payload: dict, k: int) -> list[dict]:
+        hits: list[dict] = []
+        seen_urls: set[str] = set()
+        for result in payload.get("results") or []:
+            if not isinstance(result, dict):
+                continue
+            text = self._exa_result_text(result)
+            url = str(result.get("url") or "").strip()
+            if not url:
+                result_id = str(result.get("id") or "").strip()
+                url = f"exa://{result_id}" if result_id else ""
+            if not text or not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            raw_score = result.get("score")
+            try:
+                score = float(raw_score) if raw_score is not None else 0.0
+            except (TypeError, ValueError):
+                score = 0.0
+            hits.append(
+                {
+                    "url": url,
+                    "title": str(result.get("title") or ""),
+                    "text": text,
+                    "score": score,
+                    "strategy": f"exa_{self.config.exa_search_type}",
+                }
+            )
+            if len(hits) >= k:
+                break
+        return hits
+
+    def _exa_post(self, query: str, k: int) -> dict:
+        import urllib.error
+        import urllib.request
+
+        api_key = (self.config.exa_api_key or "").strip()
+        if not api_key:
+            raise RuntimeError("exa_api_key is empty. Set EXA_API_KEY.")
+        payload = json.dumps(
+            {
+                "query": query,
+                "type": self.config.exa_search_type,
+                "numResults": k,
+                "contents": {
+                    "text": {
+                        "maxCharacters": self.config.exa_max_characters,
+                        "includeHtmlTags": False,
+                    }
+                },
+            }
+        ).encode("utf-8")
+        url = f"{self.config.exa_base_url.rstrip('/')}/search"
+        max_attempts = 4
+        wait = 1.0
+        last_error: Optional[Exception] = None
+        for attempt in range(max_attempts):
+            request = urllib.request.Request(
+                url,
+                data=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-api-key": api_key,
+                    "User-Agent": "nemo-gym-factcheck",
+                },
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(
+                    request, timeout=self.config.exa_timeout_seconds
+                ) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="replace")
+                last_error = RuntimeError(f"Exa HTTP {exc.code}: {body[:500]}")
+                if exc.code not in {408, 429, 500, 502, 503, 504} or attempt == max_attempts - 1:
+                    raise last_error from exc
+            except urllib.error.URLError as exc:
+                last_error = RuntimeError(f"Exa endpoint unreachable: {exc}")
+                if attempt == max_attempts - 1:
+                    raise last_error from exc
+            time.sleep(wait)
+            wait *= 2
+        raise RuntimeError(f"Exa search failed: {last_error}")
+
+    def _exa_search(self, query: str, k: int) -> tuple[list[dict], dict]:
+        timing = {"cached": False, "embed_s": 0.0, "milvus_s": 0.0, "exa_s": 0.0}
+        normalized_query = query.strip()
+        if not normalized_query or k <= 0:
+            return [], timing
+
+        cache_key = (
+            "exa",
+            normalized_query,
+            k,
+            self.config.exa_base_url,
+            self.config.exa_search_type,
+            self.config.exa_max_characters,
+        )
+        cached = self._search_cache_get(cache_key)
+        if cached is not None:
+            timing["cached"] = True
+            return cached, timing
+
+        t0 = time.monotonic()
+        payload = self._exa_post(normalized_query, k)
+        timing["exa_s"] = time.monotonic() - t0
+        hits = self._exa_hits_from_payload(payload, k)
+        self._search_cache_put(cache_key, hits)
+        return [dict(hit) for hit in hits], timing
 
     def _milvus_search(self, query: str, k: int) -> tuple[list[dict], dict]:
         timing = {"cached": False, "embed_s": 0.0, "milvus_s": 0.0}
@@ -1394,6 +1557,12 @@ class FactCheckingRewardModelDevResourcesServer(SimpleResourcesServer):
             elif backend == "milvus":
                 hits, search_timing = await asyncio.to_thread(
                     self._milvus_search,
+                    body.query,
+                    self.config.search_top_k,
+                )
+            elif backend == "exa":
+                hits, search_timing = await asyncio.to_thread(
+                    self._exa_search,
                     body.query,
                     self.config.search_top_k,
                 )

@@ -141,7 +141,7 @@ def main() -> None:
     else:
         print("\njudge_evaluations=<missing> (not stored on this collect)")
 
-    print("\n----- Milvus / search_wiki -----")
+    print("\n----- search_wiki -----")
     pending_query = None
     n_search = 0
     for item in resp.get("output") or []:

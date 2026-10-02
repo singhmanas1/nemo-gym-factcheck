@@ -16,7 +16,8 @@ Policy writes [Factual Errors] → verify() → factuality_f1_score
 ```
 
 - Same Lightning weights on two GPUs (`:8000` policy / `:8001` YES/NO matcher). Default: `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16` (`qwen3_coder`, `--reasoning-parser nemotron_v3`). 9B-v2: `POLICY_MODEL=nvidia/NVIDIA-Nemotron-Nano-9B-v2`. Not `Nano-8B-v2` (HF 404).
-- `search_wiki` is still Milvus (or Tavily): one HTTP call per **unique** query. Policy cap: `max_search_calls: 3`, duplicate queries skipped, then `tool_choice: none` writes the tagged verdict.
+- `search_wiki` is Milvus, Exa, or Tavily: one HTTP call per **unique** query. Policy cap: `max_search_calls: 3`, duplicate queries skipped, then `tool_choice: none` writes the tagged verdict.
+- Exa (`BACKEND=exa`, agent `fact_checking_reward_model_exa_simple_agent`) replaces embed + Milvus. Same RLHF 2.4 gold file `data/rlhf24_final_audited_dataset.jsonl` and the same F1 scorer. Requires `EXA_API_KEY`. Does not use `:8002`. Bounce Gym when switching backends (`stop_gym.sh` / `start_gym.sh`).
 - F1 vs gold `expected_errors`, not vs FineWeb. Empty gold: blank error box → F1 1. Filled gold: YES/NO matcher vs the whole error box; `num_errors` is **line-count** (no count LLM).
 - Collect **appends**. Use a new `OUTPUT_JSONL`. Sidecar `*.metrics.jsonl` has per-sample F1 plus `t_*` step times. Python-only changes: bounce Gym (`stop_gym.sh` / `start_gym.sh`), not vLLM.
 
@@ -52,7 +53,7 @@ NUM_SAMPLES_IN_PARALLEL=2 INPUT_JSONL=data/rlhf24_mixed10.jsonl OUTPUT_JSONL=./f
 python3 scripts/summarize_slice_timings.py ./factcheck_output_mixed10.jsonl
 ```
 
-Do not iterate on a single crossword row. Tavily: `BACKEND=tavily ./scripts/start_gym.sh` with `TAVILY_API_KEY`.
+Do not iterate on a single crossword row. Tavily: `BACKEND=tavily ./scripts/start_gym.sh` with `TAVILY_API_KEY`. Exa: `EXA_API_KEY=... BACKEND=exa ./scripts/start_gym.sh`, then `BACKEND=exa ./scripts/collect_rollouts.sh` (defaults to the RLHF 2.4 JSONL and `factcheck_output_exa.jsonl`).
 
 ## Do not
 
