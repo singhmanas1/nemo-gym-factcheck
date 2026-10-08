@@ -25,9 +25,10 @@ flowchart LR
   end
   In["factcheck_input.jsonl"] --> P
   P -->|"completions + tool calls"| Gym
-  Gym -->|"search_wiki"| E
+  Gym -->|"search_wiki Milvus"| E
   E --> M["Milvus :19530"]
-  Gym -.-> T["Tavily API"]
+  Gym -->|"search_wiki Exa"| X["Exa API"]
+  Gym -.->|"search_wiki Tavily"| T["Tavily API"]
   Gym -->|"YES/NO matcher"| C
   C --> Out["[Factual Errors] → F1"]
 ```
@@ -44,11 +45,13 @@ Extra GPUs on the box stay idle. Override with `POLICY_GPU` / `CHECKER_GPU` / `C
 
 ## Scoring and retrieval
 
-`search_wiki` still hits **Milvus FineWeb** (or Tavily). The policy may issue at most **3 unique** queries (`max_search_calls`); duplicate queries are stubbed. First step is forced `tool_choice: required`; after the search budget, `tool_choice: none` writes the tagged verdict.
+`search_wiki` hits **Milvus FineWeb**, **Exa**, or **Tavily**. The policy may issue at most **3 unique** queries (`max_search_calls`); duplicate queries are stubbed. First step is forced `tool_choice: required`; after the search budget, `tool_choice: none` writes the tagged verdict.
+
+HyDE is on for the Milvus and Exa agents (`hyde_search_queries: true`). The agent tells the policy to send one short hypothetical passage: clues already written in the claim only, unknowns as `[YEAR]`, `[NAME]`, `[METHOD]`, or `[CHANNEL]`. Do not guess the answer. The posted query is still the model's string. The 156-row Milvus and Exa comparison was collected with this flag off. To repeat that comparison, set `hyde_search_queries: false` and bounce Gym only.
 
 F1 is vs gold `expected_errors`, not vs the corpus:
 
-- Empty gold `[]`: F1 1 iff the error box is blank (or a “none found” one-liner).
+- Empty gold `[]`: F1 1 when the error box is blank, or one line such as `none`, `none found`, `n/a`, or `no factual errors`. A box whose only line is `(empty)`, `[None]`, `(No factual errors)`, or `[]` counts as one error.
 - Filled gold: YES/NO matcher on `:8001` vs the **whole** error box; `num_errors` is **line-count** (the count LLM is not called).
 
 Collect **appends**. Always use a new `OUTPUT_JSONL`. A compact sidecar `*.metrics.jsonl` stores per-sample F1 and `t_*` step times (`t_count_judge_s` should be 0). Gym Python changes: `./scripts/stop_gym.sh` then `./scripts/start_gym.sh` — leave vLLM/embed running.
@@ -57,7 +60,7 @@ Do not tune on a single crossword row. Use a mixed empty/filled slice (`scripts/
 
 ## Hardware notes
 
-**Lightning 30B-A3B (default, H100-class):** `--max-model-len 131072`, `--gpu-memory-utilization 0.85`, prefix caching, Triton mamba unless `nvcc` is present (`MAMBA_BACKEND=flashinfer`), `--tool-call-parser qwen3_coder`, `--reasoning-parser nemotron_v3`.
+**Lightning 30B-A3B (default):** `--max-model-len 131072`, `--gpu-memory-utilization 0.85`, prefix caching, Triton mamba unless `nvcc` is present (`MAMBA_BACKEND=flashinfer`), `--tool-call-parser qwen3_coder`, `--reasoning-parser nemotron_v3`. One replica fits a 96GB card (H100 80GB is tight at 131072; RTX PRO 6000 96GB has headroom). Weights alone are about 60GB, so a 48GB card does not fit.
 
 **9B-v2 on 32GB:** weights fit; default vLLM 32k + 0.90 util OOMs. Use `POLICY_MODEL=nvidia/NVIDIA-Nemotron-Nano-9B-v2 MAX_MODEL_LEN=8192` (0.70 util, `--enforce-eager`, `nemotron_json` parser plugin).
 
@@ -67,7 +70,7 @@ Do not tune on a single crossword row. Use a mixed empty/filled slice (`scripts/
 2. Hugging Face token with access to:
    - [`nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16`](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16) (OpenMDW; accept if gated)
    - [`google/embeddinggemma-300m`](https://huggingface.co/google/embeddinggemma-300m) (gated; acknowledge the license)
-3. A **reachable** Milvus HTTP URI on **TCP 19530**, **or** a Tavily API key.
+3. A **reachable** Milvus HTTP URI on **TCP 19530**, an Exa API key, or a Tavily API key. Exa does not use Milvus or the embed server.
 4. `curl`, Python 3.12+, and GPU CUDA matching the vLLM wheel you install.
 
 Kubernetes ClusterIPs (private `10.x` / `172.x` service IPs) only work **inside** that cluster. They time out from other VPCs and from laptops. Ask for LoadBalancer `EXTERNAL-IP`, a VPN, or an SSH tunnel:
@@ -98,23 +101,27 @@ cp deploy/milvus_override.yaml.example gym/milvus_override.yaml
 
 ./scripts/start_embed_gemma.sh
 ./scripts/start_vllm_policy_checker.sh
-# wait until logs say "Application startup complete" (about 1 minute)
+# Lightning 30B takes several minutes. Wait until BOTH logs print
+# "Application startup complete". An earlier curl fails because nothing is listening.
+# tail -f vllm_policy.log vllm_checker.log
 ./scripts/check_endpoints.sh
 
-# prove Milvus (must not time out)
-curl -m 5 -v http://127.0.0.1:19530    # or your EXTERNAL-IP:19530
+# Prove the milvus_uri in gym/milvus_override.yaml. Use 127.0.0.1:19530 only
+# after the tunnel in Prerequisites. A remote host that times out will crash Gym.
+curl -m 5 -v http://<milvus-host>:19530
 
 ./scripts/start_gym.sh                 # leave this terminal running
 ```
 
-Second terminal:
+Second terminal. Milvus with no `INPUT_JSONL` reads `examples/factcheck_example.jsonl`, not the 156-row set:
 
 ```bash
 cd nemo-gym-factcheck
 source gym/.venv/bin/activate
-./scripts/collect_rollouts.sh
-# audited RLHF set (156 rows):
-# INPUT_JSONL=data/rlhf24_final_audited_dataset.jsonl OUTPUT_JSONL=./factcheck_output.jsonl NUM_SAMPLES_IN_PARALLEL=2 ./scripts/collect_rollouts.sh
+INPUT_JSONL=data/rlhf24_final_audited_dataset.jsonl \
+  OUTPUT_JSONL=./factcheck_output.jsonl \
+  NUM_SAMPLES_IN_PARALLEL=2 \
+  ./scripts/collect_rollouts.sh
 # mixed 4 empty + 6 filled (skips Chris Rock):
 # python3 scripts/extract_mixed_gold_slice.py data/rlhf24_final_audited_dataset.jsonl data/rlhf24_mixed10.jsonl
 # INPUT_JSONL=data/rlhf24_mixed10.jsonl OUTPUT_JSONL=./factcheck_output_mixed10.jsonl NUM_SAMPLES_IN_PARALLEL=2 ./scripts/collect_rollouts.sh
@@ -154,7 +161,7 @@ Scores will **not** match FineWeb/Milvus retrieval. Same `search_wiki` tool, dif
 
 Same policy, checker, and F1 scorer as the Milvus run. `search_wiki` POSTs the query to `https://api.exa.ai/search` and returns page text. No EmbeddingGemma and no Milvus. Gold is the same audited set, `data/rlhf24_final_audited_dataset.jsonl` (`expected_errors` / `hallucination_severity` on each row).
 
-Agent name: `fact_checking_reward_model_exa_simple_agent`. Defaults: Exa `type=auto`, `numResults` = `search_top_k` (3), up to 8000 characters of page text per hit.
+Agent name: `fact_checking_reward_model_exa_simple_agent`. Defaults: Exa `type=auto`, `numResults` = `search_top_k` (3), up to 8000 characters of page text per hit. HyDE is on here too, same flag as the Milvus agent.
 
 Stop the Milvus Gym process first (`./scripts/stop_gym.sh`). Leave policy `:8000` and checker `:8001` running. Embed `:8002` is unused.
 

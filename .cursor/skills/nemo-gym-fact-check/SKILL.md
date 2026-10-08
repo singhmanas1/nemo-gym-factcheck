@@ -1,6 +1,6 @@
 ---
 name: nemo-gym-fact-check
-description: Set up and run the NeMo Gym fact-checking evaluation pipeline with Milvus or Tavily retrieval. Use when running fact-checking evaluations, collecting factuality rollouts, serving Nemotron on 32GB GPUs, or configuring ng_run / ng_collect_rollouts.
+description: Set up and run the NeMo Gym fact-checking evaluation with Milvus, Exa, or Tavily retrieval. Use when running fact-checking evaluations, collecting factuality rollouts, serving Nemotron, or configuring ng_run / ng_collect_rollouts. HyDE search prompts are on for the Milvus and Exa agents.
 ---
 
 # NeMo Gym fact-checking
@@ -10,16 +10,17 @@ Follow `README.md` in the repo root. Use `scripts/` instead of ad-hoc `vllm serv
 ## Pipeline
 
 ```
-Prompt → policy :8000 → checker :8001 ──search_wiki──► embed :8002 ──► Milvus :19530
-                                                              or Tavily
+Prompt → policy :8000 → checker :8001
+search_wiki → Milvus (embed :8002, then :19530) | Exa | Tavily
 Policy writes [Factual Errors] → verify() → factuality_f1_score
 ```
 
 - Same Lightning weights on two GPUs (`:8000` policy / `:8001` YES/NO matcher). Default: `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16` (`qwen3_coder`, `--reasoning-parser nemotron_v3`). 9B-v2: `POLICY_MODEL=nvidia/NVIDIA-Nemotron-Nano-9B-v2`. Not `Nano-8B-v2` (HF 404).
 - `search_wiki` is Milvus, Exa, or Tavily: one HTTP call per **unique** query. Policy cap: `max_search_calls: 3`, duplicate queries skipped, then `tool_choice: none` writes the tagged verdict.
 - Exa (`BACKEND=exa`, agent `fact_checking_reward_model_exa_simple_agent`) replaces embed + Milvus. Same RLHF 2.4 gold file `data/rlhf24_final_audited_dataset.jsonl` and the same F1 scorer. Requires `EXA_API_KEY`. Does not use `:8002`. Bounce Gym when switching backends (`stop_gym.sh` / `start_gym.sh`).
-- F1 vs gold `expected_errors`, not vs FineWeb. Empty gold: blank error box → F1 1. Filled gold: YES/NO matcher vs the whole error box; `num_errors` is **line-count** (no count LLM).
-- Collect **appends**. Use a new `OUTPUT_JSONL`. Sidecar `*.metrics.jsonl` has per-sample F1 plus `t_*` step times. Python-only changes: bounce Gym (`stop_gym.sh` / `start_gym.sh`), not vLLM.
+- HyDE is on for both agents (`hyde_search_queries: true` in `fact_checking_reward_model_dev.yaml` and `fact_checking_reward_model_exa.yaml`). The agent tells the policy to send one short hypothetical passage: clues already written in the claim only, unknowns as `[YEAR]`, `[NAME]`, `[METHOD]`, or `[CHANNEL]`. Do not guess the answer. The posted query is still the model's string, unchanged. The 156-row Milvus and Exa comparison was collected with this flag off. To repeat that comparison, set `hyde_search_queries: false` and bounce Gym only.
+- F1 vs gold `expected_errors`, not vs FineWeb. Empty gold: a real empty tagged error box → F1 1. Tokens such as `(empty)`, `[None]`, `(No factual errors)`, and `[]` count as one error. Filled gold: YES/NO matcher vs the whole error box; `num_errors` is **line-count** (no count LLM).
+- Collect **appends**. Use a new `OUTPUT_JSONL`. Sidecar `*.metrics.jsonl` has per-sample F1 plus `t_*` step times. Python-only changes: bounce Gym (`stop_gym.sh` / `start_gym.sh`), not vLLM. Milvus `./scripts/collect_rollouts.sh` reads `examples/factcheck_example.jsonl` unless `INPUT_JSONL` is set. The 156-row set is `data/rlhf24_final_audited_dataset.jsonl`. Exa defaults to that gold file and `factcheck_output_exa.jsonl`.
 
 ## 32GB GPUs (9B only)
 
@@ -62,3 +63,4 @@ Do not iterate on a single crossword row. Tavily: `BACKEND=tavily ./scripts/star
 - Commit `.hf_token`, `gym/env.yaml`, `gym/milvus_override.yaml`, or `factcheck_output*.jsonl`.
 - Start a second vLLM if `scripts/start_*.sh` reports already running.
 - Bounce vLLM for Gym Python-only changes; bounce Gym only (`./scripts/stop_gym.sh`).
+- Put the answer into a HyDE query. Leave unknowns as placeholders.
